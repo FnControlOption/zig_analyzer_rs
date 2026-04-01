@@ -795,7 +795,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
     pub fn resolve_member_access(
         &mut self,
         node: &Node,
-        member_info: Option<&mut Option<(Rc<Ast>, Member)>>,
+        member_info: Option<&mut Option<(Handle, Member)>>,
     ) -> Binding {
         let handle = node.handle();
         let tree = handle.tree();
@@ -816,7 +816,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         &mut self,
         ty: Type,
         name: &[u8],
-        member_info: Option<&mut Option<(Rc<Ast>, Member)>>,
+        member_info: Option<&mut Option<(Handle, Member)>>,
     ) -> Binding {
         let Type::Interned(index) = ty else {
             return Binding::Unknown;
@@ -834,10 +834,8 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             return Binding::Unknown;
         };
         let this = container_type.this().clone();
-        member_info.map(|m| {
-            let tree = this.handle().tree().clone();
-            *m = Some((tree, member));
-        });
+        let handle = this.handle();
+        member_info.map(|m| *m = Some((handle.clone(), member)));
         let mut analyzer = Analyzer {
             ip: self.ip,
             cache: self.cache,
@@ -923,7 +921,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         &mut self,
         expr: Expr,
         name: &[u8],
-        member_info: Option<&mut Option<(Rc<Ast>, Member)>>,
+        member_info: Option<&mut Option<(Handle, Member)>>,
     ) -> Expr {
         let Expr(ty, val) = expr;
         let Type::Interned(index) = ty else {
@@ -983,10 +981,8 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                     return Expr(Type::Unknown, val.to_unknown());
                 };
                 let this = container_type.this().clone();
-                member_info.map(|m| {
-                    let tree = this.handle().tree().clone();
-                    *m = Some((tree, member));
-                });
+                let handle = this.handle();
+                member_info.map(|m| *m = Some((handle.clone(), member)));
                 let mut analyzer = Analyzer {
                     ip: self.ip,
                     cache: self.cache,
@@ -1542,15 +1538,16 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let tree = handle.tree();
         let buffered = tree.full_node_buffered(node.index()).unwrap();
         let call: &full::Call = buffered.get();
-        let mut fn_expr = self.resolve_expr(Node::from(handle, call.ast.fn_expr));
+        let fn_expr_index = call.ast.fn_expr;
+        let mut fn_expr = self.resolve_expr(Node::from(handle, fn_expr_index));
         'method: {
             if fn_expr.type_of() != Type::Unknown {
                 break 'method;
             }
-            if tree.node_tag(call.ast.fn_expr) != NodeTag::FieldAccess {
+            if tree.node_tag(fn_expr_index) != NodeTag::FieldAccess {
                 break 'method;
             }
-            let NodeAndToken(lhs, token) = unsafe { tree.node_data_unchecked(call.ast.fn_expr) };
+            let NodeAndToken(lhs, token) = unsafe { tree.node_data_unchecked(fn_expr_index) };
             let lhs_expr = self.resolve_expr(Node::from(handle, lhs));
             let type_of_lhs = lhs_expr.type_of();
             let decl_name = tree.token_slice(token);
@@ -1827,11 +1824,11 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         Some(self.resolve_type(Node::from(handle, arg)))
     }
 
-    pub fn resolve_from_token<'a>(
+    pub fn resolve_from_token(
         &mut self,
-        node: &'a Node,
+        node: &Node,
         token_index: TokenIndex,
-        member_info: Option<&mut Option<(Rc<Ast>, Member)>>,
+        member_info: Option<&mut Option<(Handle, Member)>>,
     ) -> Option<Expr> {
         let handle = node.handle();
         let tree = handle.tree();
@@ -1843,7 +1840,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 }
                 let mut member = None;
                 let binding = self.resolve_identifier(&node, Some(&mut member));
-                member_info.map(|info| *info = member.map(|m| (tree.clone(), m)));
+                member_info.map(|info| *info = member.map(|m| (handle.clone(), m)));
                 Some(binding.expr())
             }
             NodeTag::GlobalVarDecl
@@ -1856,7 +1853,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                     return None;
                 }
                 let member = Member::Variable(node.index());
-                member_info.map(|info| *info = Some((tree.clone(), member)));
+                member_info.map(|info| *info = Some((handle.clone(), member)));
                 let binding = self.resolve_decl_access_this(member);
                 Some(binding.expr())
             }
@@ -1871,7 +1868,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 let name_token = TokenIndex(fn_token.0 + 1);
                 if token_index == name_token {
                     let member = Member::Function(node.index());
-                    member_info.map(|info| *info = Some((tree.clone(), member)));
+                    member_info.map(|info| *info = Some((handle.clone(), member)));
                     let binding = self.resolve_decl_access_this(member);
                     return Some(binding.expr());
                 }
@@ -1893,7 +1890,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                         return Some(expr);
                     };
                     let member = Member::FunctionParameter(param);
-                    member_info.map(|info| *info = Some((tree.clone(), member)));
+                    member_info.map(|info| *info = Some((handle.clone(), member)));
                     let binding = self.resolve_decl_access_this(member);
                     return Some(binding.expr());
                 }
@@ -1907,7 +1904,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                     return None;
                 }
                 let member = Member::Field(node.index());
-                member_info.map(|info| *info = Some((tree.clone(), member)));
+                member_info.map(|info| *info = Some((handle.clone(), member)));
                 let expr = self.resolve_field_access_this(Value::Runtime, node.index());
                 Some(expr)
             }
@@ -1917,6 +1914,8 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                     return None;
                 }
                 let binding = self.resolve_member_access(&node, member_info);
+                // TODO: If parent node is a `call` and this is part of the
+                //       function expression, resolve the method declaration.
                 Some(binding.expr())
             }
             _ => None,

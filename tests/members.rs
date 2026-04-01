@@ -148,7 +148,8 @@ fn check(annotated: &str, expected_def: &str) {
     check!(expected_ty == format!("{}", ty.display(&ip)));
     check!(expected_val == format!("{}", val.display(&ip)));
 
-    let (tree, member) = member_info.unwrap();
+    let (handle, member) = member_info.unwrap();
+    let Handle(_, tree) = handle;
     let def = str::from_utf8(member.def_slice(&tree)).unwrap();
     check!(expected_def == def);
 }

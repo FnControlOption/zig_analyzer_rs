@@ -1809,6 +1809,9 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let tree = handle.tree();
         let buffered = tree.full_node_buffered(node.index()).unwrap();
         let container_decl: &full::ContainerDecl = buffered.get();
+        if tree.token_tag(container_decl.ast.main_token) != TokenTag::KeywordUnion {
+            return None;
+        }
         if !container_decl.ast.enum_token.is_none() {
             // Tagged union with inferred tag type:
             //     union(enum) { ... }
@@ -1822,6 +1825,102 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         // Tagged union with explicit tag type:
         //     union(Foo) { ... }
         Some(self.resolve_type(Node::from(handle, arg)))
+    }
+
+    pub fn resolve_from_token<'a>(
+        &mut self,
+        node: &'a Node,
+        token_index: TokenIndex,
+        member_info: Option<&mut Option<(Rc<Ast>, Member)>>,
+    ) -> Option<Expr> {
+        let handle = node.handle();
+        let tree = handle.tree();
+        match tree.node_tag(node.index()) {
+            NodeTag::Identifier => {
+                let name_token = tree.node_main_token(node.index());
+                if token_index != name_token {
+                    return None;
+                }
+                let mut member = None;
+                let binding = self.resolve_identifier(&node, Some(&mut member));
+                member_info.map(|info| *info = member.map(|m| (tree.clone(), m)));
+                Some(binding.expr())
+            }
+            NodeTag::GlobalVarDecl
+            | NodeTag::LocalVarDecl
+            | NodeTag::SimpleVarDecl
+            | NodeTag::AlignedVarDecl => {
+                let mut_token = tree.node_main_token(node.index());
+                let name_token = TokenIndex(mut_token.0 + 1);
+                if token_index != name_token {
+                    return None;
+                }
+                let member = Member::Variable(node.index());
+                member_info.map(|info| *info = Some((tree.clone(), member)));
+                let binding = self.resolve_decl_access_this(member);
+                Some(binding.expr())
+            }
+            NodeTag::FnProtoSimple
+            | NodeTag::FnProtoMulti
+            | NodeTag::FnProtoOne
+            | NodeTag::FnProto
+            | NodeTag::FnDecl => {
+                let fn_proto_buf = tree.full_node_buffered(node.index()).unwrap();
+                let fn_proto: &full::FnProto = fn_proto_buf.get();
+                let fn_token = fn_proto.ast.fn_token;
+                let name_token = TokenIndex(fn_token.0 + 1);
+                if token_index == name_token {
+                    let member = Member::Function(node.index());
+                    member_info.map(|info| *info = Some((tree.clone(), member)));
+                    let binding = self.resolve_decl_access_this(member);
+                    return Some(binding.expr());
+                }
+                let colon_token = TokenIndex(token_index.0 + 1);
+                let param_token = TokenIndex(token_index.0 + 2);
+                if tree.token_count() >= param_token.0
+                    && tree.token_tag(token_index) == TokenTag::Identifier
+                    && tree.token_tag(colon_token) == TokenTag::Colon
+                {
+                    let mut opt_param = None;
+                    for &param in fn_proto.ast.params() {
+                        if tree.first_token(param) == param_token {
+                            opt_param = Some(param);
+                            break;
+                        }
+                    }
+                    let Some(param) = opt_param else {
+                        let expr = Expr(Type::Unknown, Value::Runtime);
+                        return Some(expr);
+                    };
+                    let member = Member::FunctionParameter(param);
+                    member_info.map(|info| *info = Some((tree.clone(), member)));
+                    let binding = self.resolve_decl_access_this(member);
+                    return Some(binding.expr());
+                }
+                None
+            }
+            NodeTag::ContainerFieldInit
+            | NodeTag::ContainerFieldAlign
+            | NodeTag::ContainerField => {
+                let name_token = tree.node_main_token(node.index());
+                if token_index != name_token {
+                    return None;
+                }
+                let member = Member::Field(node.index());
+                member_info.map(|info| *info = Some((tree.clone(), member)));
+                let expr = self.resolve_field_access_this(Value::Runtime, node.index());
+                Some(expr)
+            }
+            NodeTag::FieldAccess => {
+                let NodeAndToken(_, name_token) = unsafe { tree.node_data_unchecked(node.index()) };
+                if token_index != name_token {
+                    return None;
+                }
+                let binding = self.resolve_member_access(&node, member_info);
+                Some(binding.expr())
+            }
+            _ => None,
+        }
     }
 
     // +-----------------------------------+

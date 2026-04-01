@@ -119,9 +119,7 @@ impl Document {
         enclosing
     }
 
-    pub fn position_to_token_index(&self, line: u32, character: u32) -> TokenIndex {
-        // TODO: optimize this
-        // https://github.com/zigtools/zls/blob/ef64fa0/src/offsets.zig#L121
+    pub fn position_to_token(&self, line: u32, character: u32) -> TokenIndex {
         let source = self.tree.source();
         let mut source_index = 0;
         for _ in 0..line {
@@ -135,9 +133,18 @@ impl Document {
             }
         }
         source_index += character;
+        self.source_index_to_token(source_index)
+    }
+
+    pub fn source_index_to_token(&self, source_index: u32) -> TokenIndex {
+        // TODO: optimize this
+        // https://github.com/zigtools/zls/blob/ef64fa0/src/offsets.zig#L121
         let mut current_token = TokenIndex(0);
         loop {
             let next_token = TokenIndex(current_token.0 + 1);
+            if next_token.0 >= self.tree.token_count() {
+                return current_token;
+            }
             if self.tree.token_start(next_token) > source_index {
                 return current_token;
             }

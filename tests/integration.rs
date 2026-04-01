@@ -22,7 +22,7 @@ impl Test {
             ip: InternPool::new(),
             cache: AnalyzerCache::new(),
             documents: DocumentStore::new(),
-            env: Env::find().unwrap(),
+            env: Env::find().expect("unable to find Zig"),
             counter: 0,
         }
     }

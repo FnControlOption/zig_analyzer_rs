@@ -221,9 +221,10 @@ fn check(annotated: &str, expected_def: &str) {
     let tree = document.tree().clone();
     let handle = Handle(path.clone(), tree.clone());
 
-    let token_index = document.position_to_token(line as u32, character as u32);
+    let token_index = document.position_to_token(line as u32, character as u32, &[]);
     let container = document.enclosing_container(token_index).unwrap();
-    let doc_node = document.enclosing_nodes(token_index).last().unwrap();
+    #[rustfmt::skip]
+    let doc_node = container.enclosing_nodes(&tree, token_index).last().unwrap();
 
     let this = Node(handle.clone(), container.index);
     let node = Node(handle.clone(), doc_node.index);

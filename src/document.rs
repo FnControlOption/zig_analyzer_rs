@@ -110,7 +110,12 @@ impl Document {
         enclosing
     }
 
-    pub fn position_to_token(&self, line: u32, character: u32) -> TokenIndex {
+    pub fn position_to_token(
+        &self,
+        line: u32,
+        character: u32,
+        preferred: &[TokenTag],
+    ) -> TokenIndex {
         let source = self.tree.source();
         let mut source_index = 0;
         for _ in 0..line {
@@ -124,10 +129,10 @@ impl Document {
             }
         }
         source_index += character;
-        self.source_index_to_token(source_index)
+        self.source_index_to_token(source_index, preferred)
     }
 
-    pub fn source_index_to_token(&self, source_index: u32) -> TokenIndex {
+    pub fn source_index_to_token(&self, source_index: u32, preferred: &[TokenTag]) -> TokenIndex {
         // TODO: optimize this
         // https://github.com/zigtools/zls/blob/ef64fa0/src/offsets.zig#L121
         let mut current_token = TokenIndex(0);
@@ -136,8 +141,26 @@ impl Document {
             if next_token.0 >= self.tree.token_count() {
                 return current_token;
             }
-            if self.tree.token_start(next_token) > source_index {
+            let token_start = self.tree.token_start(next_token);
+            if token_start > source_index {
                 return current_token;
+            }
+            if token_start == source_index {
+                let current_tag = self.tree.token_tag(current_token);
+                let current_pos = preferred.iter().position(|&tag| tag == current_tag);
+                let next_tag = self.tree.token_tag(next_token);
+                let next_pos = preferred.iter().position(|&tag| tag == next_tag);
+                return match (current_pos, next_pos) {
+                    (Some(current_pos), Some(next_pos)) => {
+                        if current_pos < next_pos {
+                            current_token
+                        } else {
+                            next_token
+                        }
+                    }
+                    (Some(_), None) => current_token,
+                    _ => next_token,
+                };
             }
             current_token = next_token;
         }

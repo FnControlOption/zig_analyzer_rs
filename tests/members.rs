@@ -48,11 +48,19 @@ fn test_function_parameter() {
         ),
         "bar: usize",
     );
+    check(
+        docstr!(
+            /// fn foo(bar: usize, baz: bool) void {
+            ///     _ = bar;
+            ///         ^~~ (usize)([runtime value])
+            /// }
+        ),
+        "bar: usize",
+    );
 }
 
 #[test]
-#[ignore]
-fn test_optional_payload_if() {
+fn test_optional_payload() {
     check(
         docstr!(
             /// var foo: ?usize = undefined;
@@ -61,11 +69,34 @@ fn test_optional_payload_if() {
         ),
         "payload",
     );
+    check(
+        docstr!(
+            /// var foo: ?usize = undefined;
+            /// const bar = if (foo) |payload| payload else undefined;
+            ///                                ^~~~~~~ (usize)([runtime value])
+        ),
+        "payload",
+    );
+    check(
+        docstr!(
+            /// var foo: ?usize = undefined;
+            /// const bar = while (foo) |payload| undefined else undefined;
+            ///                          ^~~~~~~ (usize)([runtime value])
+        ),
+        "payload",
+    );
+    check(
+        docstr!(
+            /// var foo: ?usize = undefined;
+            /// const bar = while (foo) |payload| payload else undefined;
+            ///                                   ^~~~~~~ (usize)([runtime value])
+        ),
+        "payload",
+    );
 }
 
 #[test]
-#[ignore]
-fn test_error_union_payload_if() {
+fn test_error_union_payload() {
     check(
         docstr!(
             /// var foo: error{Foo}!usize = undefined;
@@ -74,16 +105,79 @@ fn test_error_union_payload_if() {
         ),
         "payload",
     );
+    check(
+        docstr!(
+            /// var foo: error{Foo}!usize = undefined;
+            /// const bar = if (foo) |payload| payload else |err| undefined;
+            ///                                ^~~~~~~ (usize)([runtime value])
+        ),
+        "payload",
+    );
+    check(
+        docstr!(
+            /// var foo: error{Foo}!usize = undefined;
+            /// const bar = while (foo) |payload| undefined else |err| undefined;
+            ///                          ^~~~~~~ (usize)([runtime value])
+        ),
+        "payload",
+    );
+    check(
+        docstr!(
+            /// var foo: error{Foo}!usize = undefined;
+            /// const bar = while (foo) |payload| payload else |err| undefined;
+            ///                                   ^~~~~~~ (usize)([runtime value])
+        ),
+        "payload",
+    );
 }
 
 #[test]
-#[ignore]
-fn test_error_union_error_if() {
+fn test_error_union_error() {
     check(
         docstr!(
             /// var foo: error{Foo}!usize = undefined;
             /// const bar = if (foo) |payload| undefined else |err| undefined;
             ///                                                ^~~ (error{Foo})([runtime value])
+        ),
+        "err",
+    );
+    check(
+        docstr!(
+            /// var foo: error{Foo}!usize = undefined;
+            /// const bar = if (foo) |payload| undefined else |err| err;
+            ///                                                     ^~~ (error{Foo})([runtime value])
+        ),
+        "err",
+    );
+    check(
+        docstr!(
+            /// var foo: error{Foo}!usize = undefined;
+            /// const bar = while (foo) |payload| undefined else |err| undefined;
+            ///                                                   ^~~ (error{Foo})([runtime value])
+        ),
+        "err",
+    );
+    check(
+        docstr!(
+            /// var foo: error{Foo}!usize = undefined;
+            /// const bar = while (foo) |payload| undefined else |err| err;
+            ///                                                        ^~~ (error{Foo})([runtime value])
+        ),
+        "err",
+    );
+    check(
+        docstr!(
+            /// var foo: error{Foo}!usize = undefined;
+            /// const bar = foo catch |err| undefined;
+            ///                        ^~~ (error{Foo})([runtime value])
+        ),
+        "err",
+    );
+    check(
+        docstr!(
+            /// var foo: error{Foo}!usize = undefined;
+            /// const bar = foo catch |err| err;
+            ///                             ^~~ (error{Foo})([runtime value])
         ),
         "err",
     );

@@ -75,7 +75,7 @@ pub struct Document {
 
 impl Document {
     pub fn new(tree: Rc<Ast>) -> Self {
-        let builder = DocumentNodeBuilder::new(NodeIndex::ROOT);
+        let builder = DocumentNodeBuilder::new(NodeIndex::ROOT, OrderMap::new());
         let root = builder.build(&tree);
         Self { tree, root }
     }
@@ -85,17 +85,8 @@ impl Document {
     }
 
     pub fn get(&self, node_index: NodeIndex) -> &DocumentNode {
-        if node_index.is_root() {
-            return &self.root;
-        }
-
-        let first_token = self.tree.first_token(node_index);
-        let start = self.tree.token_start(first_token);
-
-        let mut node = &self.root;
-        while let Some(child) = node.children.get(&start) {
-            node = child;
-        }
+        let opt_node = self.root.get(&self.tree, node_index);
+        let node = opt_node.expect("invalid node index");
         assert_eq!(node.index, node_index);
         node
     }
@@ -173,6 +164,24 @@ impl DocumentNode {
             next: Some(self),
         }
     }
+
+    pub fn get(&self, tree: &Ast, node_index: NodeIndex) -> Option<&DocumentNode> {
+        if self.index == node_index {
+            return Some(self);
+        }
+
+        let first_token = tree.first_token(node_index);
+        let start = tree.token_start(first_token);
+
+        let mut node = self;
+        while let Some(child) = node.children.get(&start) {
+            node = child;
+            if node.index == node_index {
+                return Some(node);
+            }
+        }
+        None
+    }
 }
 
 impl PartialEq for DocumentNode {
@@ -187,41 +196,113 @@ struct DocumentNodeBuilder {
     index: NodeIndex,
     children: RangeMap<u32, DocumentNode>,
     members: OrderMap<Vec<u8>, Member>,
+    child_members: HashMap<NodeIndex, OrderMap<Vec<u8>, Member>>,
 }
 
 impl DocumentNodeBuilder {
-    fn new(index: NodeIndex) -> Self {
+    fn new(index: NodeIndex, members: OrderMap<Vec<u8>, Member>) -> Self {
         Self {
             index,
             children: RangeMap::new(),
-            members: OrderMap::new(),
+            members,
+            child_members: HashMap::new(),
         }
     }
 
     fn build(mut self, tree: &Ast) -> DocumentNode {
         let index = self.index;
-        if let Some(fn_proto_buf) = tree.full_node_buffered(index) {
-            let fn_proto: &full::FnProto = fn_proto_buf.get();
-            for &param in fn_proto.ast.params() {
-                let first_token = tree.first_token(param);
-                if first_token.0 < 2 {
-                    continue;
+        let label = None; // TODO
+        let tag = tree.node_tag(index);
+        match tag {
+            NodeTag::FnProtoSimple
+            | NodeTag::FnProtoMulti
+            | NodeTag::FnProtoOne
+            | NodeTag::FnProto
+            | NodeTag::FnDecl => {
+                let fn_proto_buf = tree.full_node_buffered(index).unwrap();
+                let fn_proto: &full::FnProto = fn_proto_buf.get();
+                for &param in fn_proto.ast.params() {
+                    let type_token = tree.first_token(param);
+                    let colon_token = TokenIndex(type_token.0.saturating_sub(1));
+                    let name_token = TokenIndex(type_token.0.saturating_sub(2));
+                    if tree.token_tag(name_token) == TokenTag::Identifier
+                        && tree.token_tag(colon_token) == TokenTag::Colon
+                    {
+                        let name = tree.token_slice(name_token);
+                        let member = Member::FunctionParameter(param);
+                        self.members.insert(Vec::from(name), member);
+                    }
                 }
-                let colon_token = TokenIndex(first_token.0 - 1);
-                if tree.token_tag(colon_token) != TokenTag::Colon {
-                    continue;
-                }
-                let name_token = TokenIndex(first_token.0 - 2);
-                if tree.token_tag(name_token) != TokenTag::Identifier {
-                    continue;
-                }
-                let name = tree.token_slice(name_token);
-                let member = Member::FunctionParameter(param);
-                self.members.insert(Vec::from(name), member);
             }
+            NodeTag::IfSimple
+            | NodeTag::If
+            | NodeTag::WhileSimple
+            | NodeTag::WhileCont
+            | NodeTag::While => {
+                let (condition, payload_token, then, error_token, r#else) = match tag {
+                    NodeTag::IfSimple | NodeTag::If => {
+                        let full_if: full::If = tree.full_node(index).unwrap();
+                        (
+                            full_if.ast.cond_expr,
+                            full_if.payload_token,
+                            full_if.ast.then_expr,
+                            full_if.error_token,
+                            full_if.ast.else_expr,
+                        )
+                    }
+                    NodeTag::WhileSimple | NodeTag::WhileCont | NodeTag::While => {
+                        let full_while: full::While = tree.full_node(index).unwrap();
+                        (
+                            full_while.ast.cond_expr,
+                            full_while.payload_token,
+                            full_while.ast.then_expr,
+                            full_while.error_token,
+                            full_while.ast.else_expr,
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+                match (payload_token.to_option(), error_token.to_option()) {
+                    (Some(payload_token), None) => {
+                        let name = tree.token_slice(payload_token);
+                        let member = Member::OptionalPayload(condition, payload_token);
+                        let child = OrderMap::from([(Vec::from(name), member)]);
+                        self.child_members.insert(then, child);
+                    }
+                    (Some(payload_token), Some(error_token)) => {
+                        let name = tree.token_slice(payload_token);
+                        let member = Member::ErrorUnionPayload(condition, payload_token);
+                        let child = OrderMap::from([(Vec::from(name), member)]);
+                        self.child_members.insert(then, child);
+
+                        if let Some(else_index) = r#else.to_option() {
+                            let name = tree.token_slice(error_token);
+                            let member = Member::ErrorUnionError(condition, error_token);
+                            let child = OrderMap::from([(Vec::from(name), member)]);
+                            self.child_members.insert(else_index, child);
+                        }
+                    }
+                    (None, _) => {}
+                }
+            }
+            NodeTag::Catch => {
+                let NodeAndNode(lhs, rhs) = unsafe { tree.node_data_unchecked(index) };
+                let catch_token = tree.node_main_token(index);
+                let pipe_token = TokenIndex(catch_token.0 + 1);
+                let name_token = TokenIndex(catch_token.0 + 2);
+                if name_token.0 < tree.token_count()
+                    && tree.token_tag(pipe_token) == TokenTag::Pipe
+                    && tree.token_tag(name_token) == TokenTag::Identifier
+                {
+                    let name = tree.token_slice(name_token);
+                    let member = Member::ErrorUnionError(lhs, name_token);
+                    let child = OrderMap::from([(Vec::from(name), member)]);
+                    self.child_members.insert(rhs, child);
+                }
+            }
+            _ => {}
         }
         visit(&mut self, tree, index);
-        let label = None; // TODO
         let members = self.members;
         DocumentNode {
             index,
@@ -242,7 +323,8 @@ impl Visit for DocumentNodeBuilder {
         let start = tree.token_start(first_token);
         let end = tree.token_start(last_token) + tree.token_length(last_token);
 
-        let builder = DocumentNodeBuilder::new(index);
+        let members = self.child_members.remove(&index).unwrap_or_default();
+        let builder = DocumentNodeBuilder::new(index, members);
         let child = builder.build(tree);
 
         self.children.insert(start..end, child);
@@ -262,14 +344,15 @@ impl Visit for DocumentNodeBuilder {
             | NodeTag::SimpleVarDecl
             | NodeTag::AlignedVarDecl => {
                 let var_decl: full::VarDecl = tree.full_node(index).unwrap();
-                let mut name_token = var_decl.ast.mut_token;
-                name_token.0 += 1;
-                if name_token.0 >= tree.token_count() {
-                    return;
+                let mut_token = var_decl.ast.mut_token;
+                let name_token = TokenIndex(mut_token.0 + 1);
+                if name_token.0 < tree.token_count()
+                    && tree.token_tag(name_token) == TokenTag::Identifier
+                {
+                    let name = tree.token_slice(name_token);
+                    let member = Member::Variable(index);
+                    self.members.insert(Vec::from(name), member);
                 }
-                let name = tree.token_slice(name_token);
-                let member = Member::Variable(index);
-                self.members.insert(Vec::from(name), member);
             }
             NodeTag::FnProtoSimple
             | NodeTag::FnProtoMulti
@@ -278,12 +361,11 @@ impl Visit for DocumentNodeBuilder {
             | NodeTag::FnDecl => {
                 let fn_proto_buf = tree.full_node_buffered(index).unwrap();
                 let fn_proto: &full::FnProto = fn_proto_buf.get();
-                let Some(name_token) = fn_proto.name_token.to_option() else {
-                    return;
-                };
-                let name = tree.token_slice(name_token);
-                let member = Member::Function(index);
-                self.members.insert(Vec::from(name), member);
+                if let Some(name_token) = fn_proto.name_token.to_option() {
+                    let name = tree.token_slice(name_token);
+                    let member = Member::Function(index);
+                    self.members.insert(Vec::from(name), member);
+                }
             }
             _ => {}
         }
@@ -302,6 +384,16 @@ pub enum Member {
     Variable(NodeIndex),
     Function(NodeIndex),
     FunctionParameter(NodeIndex),
+    /// - `if (condition) |identifier| {}`
+    /// - `while (condition) |identifier| {}`
+    OptionalPayload(NodeIndex, TokenIndex),
+    /// - `if (condition) |identifier| {} else |_| {}`
+    /// - `while (condition) |identifier| {} else |_| {}`
+    ErrorUnionPayload(NodeIndex, TokenIndex),
+    /// - `if (condition) |_| {} else |identifier| {}`
+    /// - `while (condition) |_| {} else |identifier| {}`
+    /// - `condition catch |identifier| {}`
+    ErrorUnionError(NodeIndex, TokenIndex),
 }
 
 impl Member {
@@ -317,9 +409,12 @@ impl Member {
                 TokenIndex(fn_token.0 + 1)
             }
             Member::FunctionParameter(node_index) => {
-                let first_token = tree.first_token(node_index);
-                TokenIndex(first_token.0 - 2)
+                let type_token = tree.first_token(node_index);
+                TokenIndex(type_token.0 - 2)
             }
+            Member::OptionalPayload(_, token_index)
+            | Member::ErrorUnionPayload(_, token_index)
+            | Member::ErrorUnionError(_, token_index) => token_index,
         }
     }
 
@@ -333,8 +428,8 @@ impl Member {
                 tree.node_source(fn_proto.ast.proto_node)
             }
             Member::FunctionParameter(node_index) => {
-                let mut first_token = tree.first_token(node_index);
-                first_token.0 -= 2;
+                let type_token = tree.first_token(node_index);
+                let first_token = TokenIndex(type_token.0 - 2);
                 let last_token = tree.last_token(node_index);
 
                 let start = tree.token_start(first_token);
@@ -342,6 +437,9 @@ impl Member {
 
                 &tree.source()[start as usize..end as usize]
             }
+            Member::OptionalPayload(_, token_index)
+            | Member::ErrorUnionPayload(_, token_index)
+            | Member::ErrorUnionError(_, token_index) => tree.token_slice(token_index),
         }
     }
 }

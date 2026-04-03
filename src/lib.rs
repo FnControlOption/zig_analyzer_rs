@@ -447,6 +447,7 @@ impl From<Type> for Value {
 pub enum InternedValue {
     EnumLiteral(Vec<u8>),
     ErrorValue(Vec<u8>),
+    Function(Node),
 }
 
 pub struct InternPool {
@@ -924,7 +925,15 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let handle = self.this.handle().clone();
         let node = Node(handle, function);
         let ty = self.resolve_fn_proto(&node);
-        Binding::Constant(Expr(ty, Value::Unknown))
+        let val = match node.handle().tree().node_tag(node.index()) {
+            NodeTag::FnDecl => {
+                let interned = InternedValue::Function(node);
+                let index = self.ip.intern_value(interned);
+                Value::Interned(index)
+            }
+            _ => Value::Unknown,
+        };
+        Binding::Constant(Expr(ty, val))
     }
 
     fn resolve_function_param_access(&mut self, param: NodeIndex) -> Binding {
@@ -1618,6 +1627,71 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             }
             _ => return Expr(Type::Unknown, val.to_unknown()),
         };
+        'meta: {
+            if fn_type.return_type != Type::Type {
+                break 'meta;
+            }
+            let Value::Interned(index) = val else {
+                break 'meta;
+            };
+            let Some(interned) = self.ip.get_value(index) else {
+                break 'meta;
+            };
+            let InternedValue::Function(node) = interned else {
+                break 'meta;
+            };
+            let handle = node.handle();
+            let tree = handle.tree();
+            assert_eq!(tree.node_tag(node.index()), NodeTag::FnDecl);
+            let NodeAndNode(proto, body) = unsafe { tree.node_data_unchecked(node.index()) };
+            let buffered = tree.block_statements(body).unwrap();
+            let statements = buffered.get();
+            let Some(&last_statement) = statements.last() else {
+                break 'meta;
+            };
+            if tree.node_tag(last_statement) != NodeTag::Return {
+                break 'meta;
+            }
+            let opt_index: OptionalNodeIndex = unsafe { tree.node_data_unchecked(last_statement) };
+            let Some(expr_index) = opt_index.to_option() else {
+                break 'meta;
+            };
+            let name_token = {
+                let fn_token = tree.node_main_token(proto);
+                let mut it = TokenIterator::new(tree, fn_token);
+                it.consume(tree, TokenTag::KeywordFn).unwrap();
+                it.consume(tree, TokenTag::Identifier).unwrap()
+            };
+            let name = {
+                let mut name = Vec::new();
+                name.extend_from_slice(tree.token_slice(name_token));
+                name.push(b'(');
+                for (i, param) in call.ast.params().iter().enumerate() {
+                    if i > 0 {
+                        name.extend_from_slice(b", ");
+                    }
+                    // TODO
+                    name.push(b'?');
+                    let _ = param;
+                }
+                name.push(b')');
+                name
+            };
+            let mut ty = self.resolve_type(Node::from(handle, expr_index));
+            if let Type::Interned(index) = ty
+                && let Some(InternedType::Container(container_type)) = self.ip.get_type_mut(index)
+            {
+                if call.ast.params_len == 0 {
+                    container_type.name = Some(name);
+                } else {
+                    // TODO
+                    let container_type = container_type.clone();
+                    let index = self.ip.intern_type(InternedType::Container(container_type));
+                    ty = Type::Interned(index);
+                }
+            }
+            return Expr(Type::Type, Value::Type(ty));
+        }
         Expr(fn_type.return_type, val.to_unknown())
     }
 

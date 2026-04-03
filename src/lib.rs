@@ -11,10 +11,12 @@ use ordermap::OrderSet;
 use ordermap::set::MutableValues;
 use zig_ast::*;
 
+mod ast;
 mod display;
 mod document;
 mod env;
 
+pub use ast::*;
 pub use document::*;
 pub use env::*;
 
@@ -806,14 +808,11 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let tree = handle.tree();
         let NodeAndToken(lhs, token) = unsafe { tree.node_data_unchecked(node.index()) };
         let binding = self.resolve_binding(Node::from(handle, lhs));
-        binding.and_then(|is_const, expr| {
-            let expr = match expr {
-                Expr(Type::Type, Value::Type(ty)) => {
-                    return self.resolve_decl_access(ty, tree.token_slice(token), member_info);
-                }
-                _ => self.resolve_field_access(expr, tree.token_slice(token), member_info),
-            };
-            Binding::new(is_const, expr)
+        binding.and_then(|is_const, expr| match expr {
+            Expr(Type::Type, Value::Type(ty)) => {
+                self.resolve_decl_access(ty, tree.token_slice(token), member_info)
+            }
+            _ => self.resolve_field_access(is_const, expr, tree.token_slice(token), member_info),
         })
     }
 
@@ -873,7 +872,8 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let handle = self.this.handle().clone();
         let tree = handle.tree();
         let var_decl: full::VarDecl = tree.full_node(variable).unwrap();
-        let is_const = tree.token_tag(var_decl.ast.mut_token) == TokenTag::KeywordConst;
+        let mut_token = var_decl.ast.mut_token;
+        let is_const = tree.token_tag(mut_token) == TokenTag::KeywordConst;
         let expr = match (
             var_decl.ast.type_node.to_option(),
             var_decl.ast.init_node.to_option(),
@@ -909,9 +909,12 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             && let Some(InternedType::Container(container_type)) = self.ip.get_type_mut(index)
             && container_type.name.is_none()
         {
-            let name_token = TokenIndex(var_decl.ast.mut_token.0 + 1);
-            let name = tree.token_slice(name_token);
-            container_type.name = Some(Vec::from(name));
+            let mut it = TokenIterator::new(tree, mut_token);
+            assert_eq!(it.next(), Some(mut_token));
+            if let Some(name_token) = it.consume(tree, TokenTag::Identifier) {
+                let name = tree.token_slice(name_token);
+                container_type.name = Some(Vec::from(name));
+            }
         }
 
         Binding::new(is_const, expr)
@@ -954,32 +957,37 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
 
     fn resolve_field_access(
         &mut self,
+        mut is_const: bool,
         expr: Expr,
         name: &[u8],
         member_info: Option<&mut Option<(Handle, Member)>>,
-    ) -> Expr {
+    ) -> Binding {
         let Expr(ty, val) = expr;
         let Type::Interned(index) = ty else {
-            return Expr(Type::Unknown, val.to_unknown());
+            return Binding::Unknown;
         };
         let Some(mut interned) = self.ip.get_type(index) else {
-            return Expr(Type::Unknown, val.to_unknown());
+            return Binding::Unknown;
         };
         if let InternedType::Pointer(pointer_type) = interned
             && pointer_type.size == PointerSize::One
         {
             let Type::Interned(index) = pointer_type.child else {
-                return Expr(Type::Unknown, val.to_unknown());
+                return Binding::Unknown;
             };
             interned = match self.ip.get_type(index) {
                 Some(interned) => interned,
-                None => return Expr(Type::Unknown, val.to_unknown()),
+                None => return Binding::Unknown,
             };
+            is_const = pointer_type.is_const;
         }
-        match interned {
+        let expr = match interned {
             InternedType::Array(_) => match name {
-                b"len" => Expr(Type::Usize, val.to_unknown()),
-                _ => Expr(Type::Unknown, val.to_unknown()),
+                b"len" => {
+                    is_const = true;
+                    Expr(Type::Usize, val.to_unknown())
+                }
+                _ => return Binding::Unknown,
             },
             InternedType::Pointer(pointer_type) if pointer_type.size == PointerSize::Slice => {
                 match name {
@@ -991,29 +999,32 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                         let index = self.ip.intern_type(interned);
                         Expr(Type::Interned(index), val.to_unknown())
                     }
-                    _ => Expr(Type::Unknown, val.to_unknown()),
+                    _ => return Binding::Unknown,
                 }
             }
             InternedType::Tuple(types) => match name {
-                b"len" => match types.len().try_into() {
-                    Ok(len) => Expr(Type::Usize, Value::Int(len)),
-                    Err(_) => Expr(Type::Usize, val.to_unknown()),
-                },
+                b"len" => {
+                    is_const = true;
+                    match types.len().try_into() {
+                        Ok(len) => Expr(Type::Usize, Value::Int(len)),
+                        Err(_) => Expr(Type::Usize, val.to_unknown()),
+                    }
+                }
                 [b'@', b'"', slice @ .., b'"'] => match parse_str::<usize>(slice) {
                     Some(index) => Expr(types[index], val.to_unknown()),
-                    None => Expr(Type::Unknown, val.to_unknown()),
+                    None => return Binding::Unknown,
                 },
-                _ => Expr(Type::Unknown, val.to_unknown()),
+                _ => return Binding::Unknown,
             },
             InternedType::Container(container_type) => {
                 let Some(scope) = container_type.scope() else {
-                    return Expr(Type::Unknown, val.to_unknown());
+                    return Binding::Unknown;
                 };
                 let Some(&member) = scope.members.get(name) else {
-                    return Expr(Type::Unknown, val.to_unknown());
+                    return Binding::Unknown;
                 };
                 let Member::Field(field) = member else {
-                    return Expr(Type::Unknown, val.to_unknown());
+                    return Binding::Unknown;
                 };
                 let this = container_type.this().clone();
                 let handle = this.handle();
@@ -1027,8 +1038,9 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 };
                 analyzer.resolve_field_access_this(val, field)
             }
-            _ => Expr(Type::Unknown, val.to_unknown()),
-        }
+            _ => return Binding::Unknown,
+        };
+        Binding::new(is_const, expr)
     }
 
     pub fn resolve_field_access_this(&mut self, val: Value, field: NodeIndex) -> Expr {
@@ -1167,17 +1179,20 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
 
     fn resolve_error_value(&mut self, node: &Node) -> Expr {
         let tree = node.handle().tree();
-        let mut token = tree.node_main_token(node.index());
-        token.0 += 2;
-        if token.0 >= tree.token_count() {
-            return Expr(Type::Unknown, Value::Unknown);
+        let error_token = tree.node_main_token(node.index());
+        let mut it = TokenIterator::new(tree, error_token);
+        if it.consume(tree, TokenTag::KeywordError).is_some()
+            && it.consume(tree, TokenTag::Period).is_some()
+            && let Some(name_token) = it.consume(tree, TokenTag::Identifier)
+        {
+            let name = tree.token_slice(name_token);
+            let interned_type = InternedType::ErrorSet(BTreeSet::from([Vec::from(name)]));
+            let interned_value = InternedValue::ErrorValue(Vec::from(name));
+            let type_index = self.ip.intern_type(interned_type);
+            let value_index = self.ip.intern_value(interned_value);
+            return Expr(Type::Interned(type_index), Value::Interned(value_index));
         }
-        let name = tree.token_slice(token);
-        let interned_type = InternedType::ErrorSet(BTreeSet::from([Vec::from(name)]));
-        let interned_value = InternedValue::ErrorValue(Vec::from(name));
-        let type_index = self.ip.intern_type(interned_type);
-        let value_index = self.ip.intern_value(interned_value);
-        Expr(Type::Interned(type_index), Value::Interned(value_index))
+        Expr(Type::Unknown, Value::Unknown)
     }
 
     fn resolve_builtin_call(&mut self, node: &Node) -> Expr {
@@ -1575,24 +1590,10 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let call: &full::Call = buffered.get();
         let fn_expr_index = call.ast.fn_expr;
         let mut fn_expr = self.resolve_expr(Node::from(handle, fn_expr_index));
-        'method: {
-            if fn_expr.type_of() != Type::Unknown {
-                break 'method;
-            }
-            if tree.node_tag(fn_expr_index) != NodeTag::FieldAccess {
-                break 'method;
-            }
-            let NodeAndToken(lhs, token) = unsafe { tree.node_data_unchecked(fn_expr_index) };
-            let lhs_expr = self.resolve_expr(Node::from(handle, lhs));
-            let type_of_lhs = lhs_expr.type_of();
-            let decl_name = tree.token_slice(token);
-            let binding = self.resolve_decl_access(type_of_lhs, decl_name, None);
-            let Binding::Constant(expr) = binding else {
-                break 'method;
-            };
+        if fn_expr.type_of() == Type::Unknown
+            && let Some(expr) = self.resolve_method_expr(&Node::from(handle, fn_expr_index), None)
+        {
             fn_expr = expr;
-            // The first parameter should technically be type_of_lhs, but let's
-            // leave that for the compiler to complain about.
         }
         let Expr(ty, val) = fn_expr;
         let Type::Interned(index) = ty else {
@@ -1618,6 +1619,37 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             _ => return Expr(Type::Unknown, val.to_unknown()),
         };
         Expr(fn_type.return_type, val.to_unknown())
+    }
+
+    fn resolve_method_expr(
+        &mut self,
+        node: &Node,
+        member_info: Option<&mut Option<(Handle, Member)>>,
+    ) -> Option<Expr> {
+        let handle = node.handle();
+        let tree = handle.tree();
+        if tree.node_tag(node.index()) != NodeTag::FieldAccess {
+            return None;
+        }
+        let NodeAndToken(lhs, token) = unsafe { tree.node_data_unchecked(node.index()) };
+        let lhs_expr = self.resolve_expr(Node::from(handle, lhs));
+        let mut type_of_lhs = lhs_expr.type_of();
+        if let Type::Interned(index) = type_of_lhs
+            && let Some(interned) = self.ip.get_type(index)
+            && let InternedType::Pointer(pointer_type) = interned
+            && pointer_type.size == PointerSize::One
+        {
+            type_of_lhs = pointer_type.child;
+        }
+        let decl_name = tree.token_slice(token);
+        let binding = self.resolve_decl_access(type_of_lhs, decl_name, member_info);
+        let Binding::Constant(expr) = binding else {
+            return None;
+        };
+        // The first parameter should technically be (a pointer type with
+        // its child type being) type_of_lhs, but let's leave that for the
+        // compiler to complain about.
+        Some(expr)
     }
 
     // +-------------------------+
@@ -1863,7 +1895,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         &mut self,
         node: &Node,
         token_index: TokenIndex,
-        member_info: Option<&mut Option<(Handle, Member)>>,
+        mut member_info: Option<&mut Option<(Handle, Member)>>,
     ) -> Option<Expr> {
         let handle = node.handle();
         let tree = handle.tree();
@@ -1884,9 +1916,12 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 if token_index != name_token {
                     return None;
                 }
-                let binding = self.resolve_member_access(&node, member_info);
-                // TODO: If parent node is a `call` and this is part of the
-                //       function expression, resolve the method declaration.
+                let binding = self.resolve_member_access(&node, member_info.as_deref_mut());
+                if binding.is_unknown()
+                    && let Some(expr) = self.resolve_method_expr(&node, member_info)
+                {
+                    return Some(expr);
+                }
                 Some(binding.expr())
             }
             NodeTag::ContainerFieldInit
@@ -1906,7 +1941,9 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             | NodeTag::SimpleVarDecl
             | NodeTag::AlignedVarDecl => {
                 let mut_token = tree.node_main_token(node.index());
-                let name_token = TokenIndex(mut_token.0 + 1);
+                let mut it = TokenIterator::new(tree, mut_token);
+                assert_eq!(it.next(), Some(mut_token));
+                let name_token = it.consume(tree, TokenTag::Identifier)?;
                 if token_index != name_token {
                     return None;
                 }
@@ -1923,18 +1960,19 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 let fn_proto_buf = tree.full_node_buffered(node.index()).unwrap();
                 let fn_proto: &full::FnProto = fn_proto_buf.get();
                 let fn_token = fn_proto.ast.fn_token;
-                let name_token = TokenIndex(fn_token.0 + 1);
+                let mut it = TokenIterator::new(tree, fn_token);
+                it.consume(tree, TokenTag::KeywordFn)?;
+                let name_token = it.consume(tree, TokenTag::Identifier)?;
                 if token_index == name_token {
                     let member = Member::Function(node.index());
                     member_info.map(|info| *info = Some((handle.clone(), member)));
                     let binding = self.resolve_decl_access_this(member);
                     return Some(binding.expr());
                 }
-                let colon_token = TokenIndex(token_index.0 + 1);
-                let type_token = TokenIndex(token_index.0 + 2);
-                if type_token.0 < tree.token_count()
-                    && tree.token_tag(token_index) == TokenTag::Identifier
-                    && tree.token_tag(colon_token) == TokenTag::Colon
+                let mut it = TokenIterator::new(tree, token_index);
+                if it.consume(tree, TokenTag::Identifier).is_some()
+                    && it.consume(tree, TokenTag::Colon).is_some()
+                    && let Some(type_token) = it.next()
                 {
                     let mut opt_param = None;
                     for &param in fn_proto.ast.params() {
@@ -2005,7 +2043,10 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             }
             NodeTag::Catch => {
                 let catch_token = tree.node_main_token(node.index());
-                let name_token = TokenIndex(catch_token.0 + 2);
+                let mut it = TokenIterator::new(tree, catch_token);
+                it.consume(tree, TokenTag::KeywordCatch)?;
+                it.consume(tree, TokenTag::Pipe)?;
+                let name_token = it.consume(tree, TokenTag::Identifier)?;
                 if token_index != name_token {
                     return None;
                 }

@@ -15,6 +15,26 @@ fn test_field() {
         ),
         "foo: usize = undefined",
     );
+    check(
+        docstr!(
+            /// foo: usize = undefined,
+            /// const bar = @as(@This(), undefined).foo;
+            ///                                     ^~~ (usize)([unknown value])
+        ),
+        "foo: usize = undefined",
+    );
+}
+
+#[test]
+fn test_method() {
+    check(
+        docstr!(
+            /// fn foo(_: @This()) void {}
+            /// const bar = @as(@This(), undefined).foo();
+            ///                                     ^~~ (fn ([container]) void)([unknown value])
+        ),
+        "fn foo(_: @This()) void",
+    );
 }
 
 #[test]
@@ -23,6 +43,14 @@ fn test_variable() {
         docstr!(
             /// var foo: usize = undefined;
             ///     ^~~ (usize)([runtime value])
+        ),
+        "var foo: usize = undefined",
+    );
+    check(
+        docstr!(
+            /// var foo: usize = undefined;
+            /// const bar = foo;
+            ///             ^~~ (usize)([runtime value])
         ),
         "var foo: usize = undefined",
     );

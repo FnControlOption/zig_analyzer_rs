@@ -302,7 +302,7 @@ fn test_decl_access_var() {
         Binding::Constant(Expr(Type::Usize, Value::Undefined)) == test.resolve_binding("struct { const foo: usize = undefined; }.foo")
     }
     check! {
-        Binding::Constant(Expr(Type::Unknown, Value::Unknown)) == test.resolve_binding("@as(struct { const foo: usize = undefined; }, undefined).foo")
+        Binding::Unknown == test.resolve_binding("@as(struct { const foo: usize = undefined; }, undefined).foo")
     }
     check! {
         Binding::Variable(Expr(Type::Usize, Value::Runtime)) == test.resolve_binding("struct { var foo: usize = undefined; }.foo")
@@ -327,7 +327,7 @@ fn test_decl_access_fn() {
         && Binding::Constant(Expr(fn_ty, Value::Unknown)) == test.resolve_binding("struct { fn foo(_: usize) void {} }.foo")
     }
     check! {
-        Binding::Constant(Expr(Type::Unknown, Value::Unknown)) == test.resolve_binding("@as(struct { fn foo(_: usize) void {} }, undefined).foo")
+        Binding::Unknown == test.resolve_binding("@as(struct { fn foo(_: usize) void {} }, undefined).foo")
     }
     check! {
         let Binding::Constant(Expr(ty, value)) = test.resolve_binding("struct { fn foo(_: @This()) void {} }.foo")
@@ -398,6 +398,17 @@ fn test_field_access_variable_container() {
     let mut test = Test::new();
     check! {
         Binding::Variable(Expr(Type::Usize, Value::Runtime)) == test.resolve_binding("struct { var foo: struct { bar: usize } = undefined; }.foo.bar")
+    }
+}
+
+#[test]
+fn test_field_access_pointer() {
+    let mut test = Test::new();
+    check! {
+        Binding::Constant(Expr(Type::Usize, Value::Unknown)) == test.resolve_binding("@as(*const struct { foo: usize }, undefined).foo")
+    }
+    check! {
+        Binding::Variable(Expr(Type::Usize, Value::Unknown)) == test.resolve_binding("@as(*struct { foo: usize }, undefined).foo")
     }
 }
 
@@ -491,7 +502,6 @@ fn test_builtin_call_import() {
 }
 
 #[test]
-#[ignore]
 fn test_builtin_call_import_std() {
     let mut test = Test::new();
     check! {
@@ -499,6 +509,7 @@ fn test_builtin_call_import_std() {
         && let Type::Interned(index) = ty
         && let Some(interned) = test.ip.get_type(index)
         && let InternedType::Container(container_type) = interned
+        && container_type.this().handle().path().parent() == Some(test.env.std_dir.as_path())
         && container_type.this().index() == NodeIndex::ROOT
     }
 }
@@ -840,6 +851,9 @@ fn test_call_method() {
     let mut test = Test::new();
     check! {
         Expr(Type::Void, Value::Unknown) == test.resolve_expr("@as(struct { fn foo(_: @This()) void {} }, undefined).foo()")
+    }
+    check! {
+        Expr(Type::Void, Value::Unknown) == test.resolve_expr("@as(*const struct { fn foo(_: @This()) void {} }, undefined).foo()")
     }
 }
 

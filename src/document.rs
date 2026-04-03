@@ -218,6 +218,7 @@ impl Eq for DocumentNode {}
 struct DocumentNodeBuilder {
     index: NodeIndex,
     children: RangeMap<u32, DocumentNode>,
+    label: Option<Vec<u8>>,
     members: OrderMap<Vec<u8>, Member>,
     child_members: HashMap<NodeIndex, OrderMap<Vec<u8>, Member>>,
 }
@@ -227,14 +228,31 @@ impl DocumentNodeBuilder {
         Self {
             index,
             children: RangeMap::new(),
+            label: None,
             members,
             child_members: HashMap::new(),
         }
     }
 
     fn build(mut self, tree: &Ast) -> DocumentNode {
+        self.process(tree);
         let index = self.index;
-        let label = None; // TODO
+        visit(&mut self, tree, index);
+        let children = self.children;
+        let label = self.label;
+        let members = self.members;
+        DocumentNode {
+            index,
+            children,
+            scope: match label.is_some() || members.len() > 0 {
+                true => Some(Rc::new(Scope { label, members })),
+                false => None,
+            },
+        }
+    }
+
+    fn process(&mut self, tree: &Ast) {
+        let index = self.index;
         let tag = tree.node_tag(index);
         match tag {
             NodeTag::FnProtoSimple
@@ -311,11 +329,10 @@ impl DocumentNodeBuilder {
             NodeTag::Catch => {
                 let NodeAndNode(lhs, rhs) = unsafe { tree.node_data_unchecked(index) };
                 let catch_token = tree.node_main_token(index);
-                let pipe_token = TokenIndex(catch_token.0 + 1);
-                let name_token = TokenIndex(catch_token.0 + 2);
-                if name_token.0 < tree.token_count()
-                    && tree.token_tag(pipe_token) == TokenTag::Pipe
-                    && tree.token_tag(name_token) == TokenTag::Identifier
+                let mut it = TokenIterator::new(tree, catch_token);
+                if it.consume(tree, TokenTag::KeywordCatch).is_some()
+                    && it.consume(tree, TokenTag::Pipe).is_some()
+                    && let Some(name_token) = it.consume(tree, TokenTag::Identifier)
                 {
                     let name = tree.token_slice(name_token);
                     let member = Member::ErrorUnionError(lhs, name_token);
@@ -324,16 +341,6 @@ impl DocumentNodeBuilder {
                 }
             }
             _ => {}
-        }
-        visit(&mut self, tree, index);
-        let members = self.members;
-        DocumentNode {
-            index,
-            children: self.children,
-            scope: match label.is_some() || members.len() > 0 {
-                true => Some(Rc::new(Scope { label, members })),
-                false => None,
-            },
         }
     }
 }
@@ -368,10 +375,9 @@ impl Visit for DocumentNodeBuilder {
             | NodeTag::AlignedVarDecl => {
                 let var_decl: full::VarDecl = tree.full_node(index).unwrap();
                 let mut_token = var_decl.ast.mut_token;
-                let name_token = TokenIndex(mut_token.0 + 1);
-                if name_token.0 < tree.token_count()
-                    && tree.token_tag(name_token) == TokenTag::Identifier
-                {
+                let mut it = TokenIterator::new(tree, mut_token);
+                assert_eq!(it.next(), Some(mut_token));
+                if let Some(name_token) = it.consume(tree, TokenTag::Identifier) {
                     let name = tree.token_slice(name_token);
                     let member = Member::Variable(index);
                     self.members.insert(Vec::from(name), member);

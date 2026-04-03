@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -59,6 +59,7 @@ impl Test {
             documents: &mut self.documents,
             std_dir: Some(&self.env.std_dir),
             this: root,
+            type_args: BTreeMap::new(),
         }
     }
 
@@ -870,6 +871,11 @@ fn test_call_type_function() {
         let Expr(Type::Type, value) = test.resolve_expr("struct { fn Foo() type { return struct { foo: usize }; } }.Foo()")
         && let Value::Type(ty) = value
         && test.format_type(ty) == "Foo()"
+    }
+    check! {
+        let Expr(Type::Type, value) = test.resolve_expr("struct { fn Foo(comptime T: type, _: usize) type { return struct { foo: T }; } }.Foo(usize, 1)")
+        && let Value::Type(ty) = value
+        && test.format_type(ty) == "Foo(usize, ?)"
     }
 }
 

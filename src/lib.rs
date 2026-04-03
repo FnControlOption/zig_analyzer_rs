@@ -1,8 +1,9 @@
 use std::cell::LazyCell;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
 use std::str::FromStr;
@@ -47,13 +48,25 @@ impl PartialEq for Handle {
 
 impl Eq for Handle {}
 
+impl PartialOrd for Handle {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.path().partial_cmp(other.path())
+    }
+}
+
+impl Ord for Handle {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.path().cmp(other.path())
+    }
+}
+
 impl Hash for Handle {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.path().hash(state);
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Node(pub Handle, pub NodeIndex);
 
 impl Node {
@@ -288,6 +301,7 @@ pub struct FunctionType {
 #[derive(Clone, Debug)]
 pub struct ContainerType {
     this: Node,
+    type_args: BTreeMap<NodeIndex, Type>,
     name: Option<Vec<u8>>,
     scope: Option<Rc<Scope>>,
 }
@@ -295,10 +309,16 @@ pub struct ContainerType {
 impl ContainerType {
     pub fn new(this: Node, documents: &mut DocumentStore) -> Self {
         let path = this.handle().path().clone();
-        let name = None;
-        let scope =
-            (documents.get_or_parse(path)).and_then(|doc| doc.get(this.index()).scope.clone());
-        ContainerType { this, name, scope }
+        let scope = match documents.get_or_parse(path) {
+            Some(document) => document.get(this.index()).scope.clone(),
+            None => None,
+        };
+        ContainerType {
+            this,
+            type_args: BTreeMap::new(),
+            name: None,
+            scope,
+        }
     }
 
     pub fn this(&self) -> &Node {
@@ -321,6 +341,9 @@ impl PartialEq for ContainerType {
         if self.this != other.this {
             return false;
         }
+        if self.type_args != other.type_args {
+            return false;
+        }
         match (&self.scope, &other.scope) {
             (None, None) => true,
             (None, Some(_)) | (Some(_), None) => false,
@@ -334,6 +357,7 @@ impl Eq for ContainerType {}
 impl Hash for ContainerType {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.this.hash(state);
+        self.type_args.hash(state);
     }
 }
 
@@ -556,7 +580,8 @@ pub struct Analyzer<'ip, 'cache, 'doc, 'std> {
     pub cache: &'cache mut AnalyzerCache,
     pub documents: &'doc mut DocumentStore,
     pub std_dir: Option<&'std Path>,
-    pub this: Node,
+    pub this: Node, // TODO: should this be a stack/hierarchy?
+    pub type_args: BTreeMap<NodeIndex, Type>,
 }
 
 impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
@@ -666,6 +691,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             documents: self.documents,
             std_dir: self.std_dir,
             this,
+            type_args: BTreeMap::new(),
         };
         analyzer.resolve_decl_access_this(member)
     }
@@ -847,6 +873,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             documents: self.documents,
             std_dir: self.std_dir,
             this,
+            type_args: BTreeMap::new(),
         };
         analyzer.resolve_decl_access_this(member)
     }
@@ -1044,6 +1071,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                     documents: self.documents,
                     std_dir: self.std_dir,
                     this,
+                    type_args: BTreeMap::new(),
                 };
                 analyzer.resolve_field_access_this(val, field)
             }
@@ -1274,6 +1302,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let handle = Handle(path.clone(), tree.clone());
         let container_type = ContainerType {
             this: Node(handle, NodeIndex::ROOT),
+            type_args: BTreeMap::new(),
             name: None,
             scope: document.get(NodeIndex::ROOT).scope.clone(),
         };
@@ -1599,15 +1628,19 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let call: &full::Call = buffered.get();
         let fn_expr_index = call.ast.fn_expr;
         let mut fn_expr = self.resolve_expr(Node::from(handle, fn_expr_index));
+        let mut skipped = 0;
         if fn_expr.type_of() == Type::Unknown
             && let Some(expr) = self.resolve_method_expr(&Node::from(handle, fn_expr_index), None)
         {
             fn_expr = expr;
+            skipped = 1;
         }
         let Expr(ty, val) = fn_expr;
         let Type::Interned(index) = ty else {
             return Expr(Type::Unknown, val.to_unknown());
         };
+        #[rustfmt::skip]
+        let call_args = call.ast.params().iter().map(|&i| self.resolve_expr(Node::from(handle, i))).collect::<Vec<_>>();
         let Some(interned) = self.ip.get_type(index) else {
             return Expr(Type::Unknown, val.to_unknown());
         };
@@ -1656,23 +1689,39 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             let Some(expr_index) = opt_index.to_option() else {
                 break 'meta;
             };
-            let name_token = {
-                let fn_token = tree.node_main_token(proto);
-                let mut it = TokenIterator::new(tree, fn_token);
-                it.consume(tree, TokenTag::KeywordFn).unwrap();
-                it.consume(tree, TokenTag::Identifier).unwrap()
-            };
+            let fn_proto_buf = tree.full_node_buffered(proto).unwrap();
+            let fn_proto: &full::FnProto = fn_proto_buf.get();
+
+            let mut type_args = BTreeMap::new();
+            let fn_params = fn_proto.ast.params().iter().skip(skipped);
+            let param_types = fn_type.params.iter().skip(skipped);
+            for ((&param, &param_type), arg_expr) in fn_params.zip(param_types).zip(call_args) {
+                if param_type == Type::Type {
+                    let ty = match arg_expr {
+                        Expr(Type::Type, Value::Type(type_arg)) => type_arg,
+                        _ => Type::Unknown,
+                    };
+                    type_args.insert(param, ty);
+                }
+            }
+
+            let name_token = fn_proto.name_token.to_option().unwrap();
             let name = {
                 let mut name = Vec::new();
                 name.extend_from_slice(tree.token_slice(name_token));
                 name.push(b'(');
-                for (i, param) in call.ast.params().iter().enumerate() {
+                for (i, &param) in fn_proto.ast.params().iter().enumerate() {
                     if i > 0 {
                         name.extend_from_slice(b", ");
                     }
-                    // TODO
-                    name.push(b'?');
-                    let _ = param;
+                    match type_args.get(&param) {
+                        Some(ty) => {
+                            let _ = write!(&mut name, "{}", ty.display(self.ip));
+                        }
+                        None => {
+                            name.push(b'?');
+                        }
+                    }
                 }
                 name.push(b')');
                 name
@@ -1681,11 +1730,12 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             if let Type::Interned(index) = ty
                 && let Some(InternedType::Container(container_type)) = self.ip.get_type_mut(index)
             {
-                if call.ast.params_len == 0 {
+                if type_args.is_empty() {
                     container_type.name = Some(name);
                 } else {
-                    // TODO
-                    let container_type = container_type.clone();
+                    let mut container_type = container_type.clone();
+                    container_type.name = Some(name);
+                    container_type.type_args = type_args;
                     let index = self.ip.intern_type(InternedType::Container(container_type));
                     ty = Type::Interned(index);
                 }

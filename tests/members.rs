@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -263,6 +264,7 @@ fn check(annotated: &str, expected_def: &str) {
         documents: &mut documents,
         std_dir: Some(&env.std_dir),
         this,
+        type_args: BTreeMap::new(),
     };
     let mut member_info = None;
     let opt_expr = analyzer.resolve_from_token(&node, token_index, Some(&mut member_info));

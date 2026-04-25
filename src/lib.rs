@@ -1206,7 +1206,14 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
 
             BuiltinFnTag::FieldType => Expr::from(Type::Unknown),
             BuiltinFnTag::This => Expr::from(self.resolve_builtin_call_this()),
-            BuiltinFnTag::Type => Expr::from(Type::Unknown),
+            BuiltinFnTag::EnumLiteral => Expr::from(Type::Unknown),
+            BuiltinFnTag::Int => Expr::from(Type::Unknown),
+            BuiltinFnTag::Tuple => Expr::from(Type::Unknown),
+            BuiltinFnTag::Pointer => Expr::from(Type::Unknown),
+            BuiltinFnTag::Fn => Expr::from(Type::Unknown),
+            BuiltinFnTag::Struct => Expr::from(Type::Unknown),
+            BuiltinFnTag::Union => Expr::from(Type::Unknown),
+            BuiltinFnTag::Enum => Expr::from(Type::Unknown),
             BuiltinFnTag::TypeOf => Expr::from(self.resolve_builtin_call_type_of(handle, args)),
             BuiltinFnTag::Vector => Expr::from(self.resolve_builtin_call_vector(handle, args)),
 

@@ -31,7 +31,7 @@ fn test_method() {
         docstr!(
             /// fn foo(_: @This()) void {}
             /// const bar = @as(@This(), undefined).foo();
-            ///                                     ^~~ (fn ([container]) void)([unknown value])
+            ///                                     ^~~ (fn ([container]) void)([function 'foo'])
         ),
         "fn foo(_: @This()) void",
     );

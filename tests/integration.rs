@@ -44,6 +44,10 @@ impl Test {
         format!("{}", ty.display(&self.ip))
     }
 
+    fn format_value(&self, value: Value) -> String {
+        format!("{}", value.display(&self.ip))
+    }
+
     fn parse_source<T: Into<Vec<u8>>>(&mut self, source: T, path: Option<PathBuf>) -> Node {
         let path = Rc::<Path>::from(path.unwrap_or_else(|| {
             self.counter += 1;
@@ -310,15 +314,17 @@ fn test_decl_access_var() {
 fn test_decl_access_fn() {
     let mut test = Test::new();
     check! {
-        let fn_ty = test.resolve_type("fn (usize) void")
-        && Binding::Constant(Expr(fn_ty, Value::Unknown)) == test.resolve_binding("struct { fn foo(_: usize) void {} }.foo")
+        let Binding::Constant(Expr(ty, value)) = test.resolve_binding("struct { fn foo(_: usize) void {} }.foo")
+        && ty == test.resolve_type("fn (usize) void")
+        && test.format_value(value) == "[function 'foo']"
     }
     check! {
         Binding::Unknown == test.resolve_binding("@as(struct { fn foo(_: usize) void {} }, undefined).foo")
     }
     check! {
         let Binding::Constant(Expr(ty, value)) = test.resolve_binding("struct { fn foo(_: @This()) void {} }.foo")
-        && let (Type::Interned(index), Value::Unknown) = (ty, value)
+        && test.format_value(value) == "[function 'foo']"
+        && let Type::Interned(index) = ty
         && let Some(interned) = test.ip.get_type(index)
         && let InternedType::Function(function_type) = interned
         && let FunctionType {

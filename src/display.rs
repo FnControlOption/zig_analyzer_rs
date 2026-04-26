@@ -243,6 +243,19 @@ impl Display for InternedValueDisplay<'_, '_> {
         match interned {
             InternedValue::EnumLiteral(name) => write!(f, ".{}", String::from_utf8_lossy(name)),
             InternedValue::ErrorValue(name) => write!(f, "error.{}", String::from_utf8_lossy(name)),
+            InternedValue::Function(node) => {
+                let tree = node.handle().tree();
+                let fn_token = tree.node_main_token(node.index());
+                let mut it = TokenIterator::new(tree, fn_token);
+                if it.consume(tree, TokenTag::KeywordFn).is_some()
+                    && let Some(name_token) = it.consume(tree, TokenTag::Identifier)
+                {
+                    let name = tree.token_slice(name_token);
+                    write!(f, "[function '{}']", String::from_utf8_lossy(name))
+                } else {
+                    f.write_str("[function]")
+                }
+            }
         }
     }
 }

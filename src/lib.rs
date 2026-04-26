@@ -447,6 +447,7 @@ impl From<Type> for Value {
 pub enum InternedValue {
     EnumLiteral(Vec<u8>),
     ErrorValue(Vec<u8>),
+    Function(Node),
 }
 
 pub struct InternPool {
@@ -898,7 +899,15 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
     fn resolve_function_access(&mut self, handle: &Handle, function: NodeIndex) -> Binding {
         let node = Node(handle.clone(), function);
         let ty = self.resolve_fn_proto(&node);
-        Binding::Constant(Expr(ty, Value::Unknown))
+        let val = match node.handle().tree().node_tag(node.index()) {
+            NodeTag::FnDecl => {
+                let interned = InternedValue::Function(node);
+                let index = self.ip.intern_value(interned);
+                Value::Interned(index)
+            }
+            _ => Value::Unknown,
+        };
+        Binding::Constant(Expr(ty, val))
     }
 
     fn resolve_function_param_access(&mut self, handle: &Handle, param: NodeIndex) -> Binding {

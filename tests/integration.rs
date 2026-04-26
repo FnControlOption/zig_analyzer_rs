@@ -27,6 +27,15 @@ impl Test {
         }
     }
 
+    fn analyzer(&mut self) -> Analyzer<'_, '_, '_, '_> {
+        Analyzer {
+            ip: &mut self.ip,
+            cache: &mut self.cache,
+            documents: &mut self.documents,
+            std_dir: Some(&self.env.std_dir),
+        }
+    }
+
     fn intern_type(&mut self, interned: InternedType) -> Type {
         Type::Interned(self.ip.intern_type(interned))
     }
@@ -35,11 +44,7 @@ impl Test {
         format!("{}", ty.display(&self.ip))
     }
 
-    fn parse_source<T: Into<Vec<u8>>>(
-        &mut self,
-        source: T,
-        path: Option<PathBuf>,
-    ) -> Analyzer<'_, '_, '_, '_> {
+    fn parse_source<T: Into<Vec<u8>>>(&mut self, source: T, path: Option<PathBuf>) -> Node {
         let path = Rc::<Path>::from(path.unwrap_or_else(|| {
             self.counter += 1;
             PathBuf::from(format!("/foo/bar{}.zig", self.counter))
@@ -48,53 +53,37 @@ impl Test {
         let document = self.documents.parse(path.clone(), Some(source)).unwrap();
         let tree = document.tree();
         let handle = Handle(path.clone(), tree.clone());
-        let root = Node(handle, NodeIndex::ROOT);
-        Analyzer {
-            ip: &mut self.ip,
-            cache: &mut self.cache,
-            documents: &mut self.documents,
-            std_dir: Some(&self.env.std_dir),
-            this: root,
-        }
+        Node(handle, NodeIndex::ROOT)
     }
 
-    fn parse_expression<S: AsRef<str>>(
-        &mut self,
-        s: S,
-        path: Option<PathBuf>,
-    ) -> (Analyzer<'_, '_, '_, '_>, Node) {
+    fn parse_expression<S: AsRef<str>>(&mut self, s: S, path: Option<PathBuf>) -> Node {
         let source = format!("const foo = {};", s.as_ref());
-        let analyzer = self.parse_source(source, path);
-
-        let root = analyzer.this();
+        let root = self.parse_source(source, path);
         let handle = root.handle();
         let tree = handle.tree();
         let index = tree.root_decls().next().unwrap();
         let var_decl: full::VarDecl = tree.full_node(index).unwrap();
         let init = var_decl.ast.init_node.to_option().unwrap();
-        let node = Node::from(handle, init);
-
-        (analyzer, node)
+        Node::from(handle, init)
     }
 
     fn resolve_binding<S: AsRef<str>>(&mut self, s: S) -> Binding {
-        let (mut analyzer, node) = self.parse_expression(s, None);
-        analyzer.resolve_binding(node)
+        let node = self.parse_expression(s, None);
+        self.analyzer().resolve_binding(node)
     }
 
     fn resolve_expr<S: AsRef<str>>(&mut self, s: S) -> Expr {
-        let (mut analyzer, node) = self.parse_expression(s, None);
-        analyzer.resolve_expr(node)
+        let node = self.parse_expression(s, None);
+        self.analyzer().resolve_expr(node)
     }
 
     fn resolve_type<S: AsRef<str>>(&mut self, s: S) -> Type {
-        let (mut analyzer, node) = self.parse_expression(s, None);
-        analyzer.resolve_type(node)
+        let node = self.parse_expression(s, None);
+        self.analyzer().resolve_type(node)
     }
 
     fn resolve_peer_types(&mut self, peer_types: &[Type]) -> Type {
-        let (mut analyzer, _) = self.parse_expression("{}", None);
-        analyzer.resolve_peer_types(peer_types)
+        self.analyzer().resolve_peer_types(peer_types)
     }
 }
 
@@ -137,9 +126,7 @@ fn test_identifier_decl() {
         /// const a: @This() = undefined;
         /// const b = a;
     );
-    let mut analyzer = test.parse_source(source, None);
-
-    let root = analyzer.this();
+    let root = test.parse_source(source, None);
     let handle = root.handle();
     let tree = handle.tree();
     let root_decls: Vec<_> = tree.root_decls().collect();
@@ -150,7 +137,7 @@ fn test_identifier_decl() {
     let b_node = Node::from(handle, init);
 
     check! {
-        let Expr(Type::Interned(index), Value::Undefined) = analyzer.resolve_expr(b_node)
+        let Expr(Type::Interned(index), Value::Undefined) = test.analyzer().resolve_expr(b_node)
         && let Some(interned) = test.ip.get_type(index)
         && let InternedType::Container(container_type) = interned
         && container_type.this().index() == NodeIndex::ROOT
@@ -489,10 +476,10 @@ fn test_builtin_call_import() {
     std::fs::write(&foo_path, "foo: f32").unwrap();
 
     let mut test = Test::new();
-    let (mut analyzer, node) = test.parse_expression(r#"@import("foo.zig");"#, Some(bar_path));
+    let node = test.parse_expression(r#"@import("foo.zig");"#, Some(bar_path));
 
     check! {
-        let Expr(Type::Type, Value::Type(ty)) = analyzer.resolve_expr(node)
+        let Expr(Type::Type, Value::Type(ty)) = test.analyzer().resolve_expr(node)
         && let Type::Interned(index) = ty
         && let Some(interned) = test.ip.get_type(index)
         && let InternedType::Container(container_type) = interned
@@ -1212,9 +1199,9 @@ fn test_peer_types_enum_or_union() {
     let union_bar = test.resolve_type("union { bar: bool }");
 
     let (inferred_tagged_union, inferred_tagged_union_tag) = {
-        let (mut analyzer, node) = test.parse_expression("union(enum) { foo: f32 }", None);
-        let ty = analyzer.resolve_type(node);
-        let tag = analyzer.resolve_union_tag(ty).unwrap();
+        let node = test.parse_expression("union(enum) { foo: f32 }", None);
+        let ty = test.analyzer().resolve_type(node);
+        let tag = test.analyzer().resolve_union_tag(ty).unwrap();
         check! {
             let Type::UnionTag(_) = tag
         }
@@ -1222,10 +1209,9 @@ fn test_peer_types_enum_or_union() {
     };
 
     let (explicit_tagged_union, explicit_tagged_union_tag) = {
-        let (mut analyzer, node) =
-            test.parse_expression("union( (enum { foo }) ) { foo: f32 }", None);
-        let ty = analyzer.resolve_type(node);
-        let tag = analyzer.resolve_union_tag(ty).unwrap();
+        let node = test.parse_expression("union( (enum { foo }) ) { foo: f32 }", None);
+        let ty = test.analyzer().resolve_type(node);
+        let tag = test.analyzer().resolve_union_tag(ty).unwrap();
         check! {
             test.format_type(tag) == "enum { foo }"
         }

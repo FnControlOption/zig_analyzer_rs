@@ -254,7 +254,6 @@ fn check(annotated: &str, expected_def: &str) {
     #[rustfmt::skip]
     let doc_node = container.enclosing_nodes(&tree, token_index).last().unwrap();
 
-    let this = Node(handle.clone(), container.index);
     let node = Node(handle.clone(), doc_node.index);
 
     let mut analyzer = Analyzer {
@@ -262,7 +261,6 @@ fn check(annotated: &str, expected_def: &str) {
         cache: &mut cache,
         documents: &mut documents,
         std_dir: Some(&env.std_dir),
-        this,
     };
     let mut member_info = None;
     let opt_expr = analyzer.resolve_from_token(&node, token_index, Some(&mut member_info));

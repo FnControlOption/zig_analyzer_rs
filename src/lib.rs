@@ -555,14 +555,9 @@ pub struct Analyzer<'ip, 'cache, 'doc, 'std> {
     pub cache: &'cache mut AnalyzerCache,
     pub documents: &'doc mut DocumentStore,
     pub std_dir: Option<&'std Path>,
-    pub this: Node,
 }
 
 impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
-    pub fn this(&self) -> &Node {
-        &self.this
-    }
-
     pub fn resolve_type(&mut self, node: Node) -> Type {
         match self.resolve_expr(node) {
             Expr(Type::Type, Value::Type(ty)) => ty,
@@ -654,19 +649,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             return Binding::Unknown;
         };
         member_out.map(|m| *m = Some(member));
-        let member_token = member.name_token(tree);
-        let Some(container) = document.enclosing_container(member_token) else {
-            return Binding::Unknown;
-        };
-        let this = Node::from(handle, container.index);
-        let mut analyzer = Analyzer {
-            ip: self.ip,
-            cache: self.cache,
-            documents: self.documents,
-            std_dir: self.std_dir,
-            this,
-        };
-        analyzer.resolve_decl_access_this(member)
+        self.resolve_decl(handle, member)
     }
 
     fn resolve_unwrap_optional(&mut self, node: &Node) -> Binding {
@@ -840,36 +823,28 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let this = container_type.this().clone();
         let handle = this.handle();
         member_info.map(|m| *m = Some((handle.clone(), member)));
-        let mut analyzer = Analyzer {
-            ip: self.ip,
-            cache: self.cache,
-            documents: self.documents,
-            std_dir: self.std_dir,
-            this,
-        };
-        analyzer.resolve_decl_access_this(member)
+        self.resolve_decl(handle, member)
     }
 
-    pub fn resolve_decl_access_this(&mut self, member: Member) -> Binding {
+    pub fn resolve_decl(&mut self, handle: &Handle, member: Member) -> Binding {
         match member {
             Member::Field(_) => Binding::Unknown,
-            Member::Variable(variable) => self.resolve_variable_access(variable),
-            Member::Function(function) => self.resolve_function_access(function),
-            Member::FunctionParameter(param) => self.resolve_function_param_access(param),
+            Member::Variable(variable) => self.resolve_variable_access(handle, variable),
+            Member::Function(function) => self.resolve_function_access(handle, function),
+            Member::FunctionParameter(param) => self.resolve_function_param_access(handle, param),
             Member::OptionalPayload(condition, _) => {
-                self.resolve_optional_payload_access(condition)
+                self.resolve_optional_payload_access(handle, condition)
             }
             Member::ErrorUnionPayload(condition, _) => {
-                self.resolve_error_union_payload_access(condition)
+                self.resolve_error_union_payload_access(handle, condition)
             }
             Member::ErrorUnionError(condition, _) => {
-                self.resolve_error_union_error_access(condition)
+                self.resolve_error_union_error_access(handle, condition)
             }
         }
     }
 
-    fn resolve_variable_access(&mut self, variable: NodeIndex) -> Binding {
-        let handle = self.this.handle().clone();
+    fn resolve_variable_access(&mut self, handle: &Handle, variable: NodeIndex) -> Binding {
         let tree = handle.tree();
         let var_decl: full::VarDecl = tree.full_node(variable).unwrap();
         let mut_token = var_decl.ast.mut_token;
@@ -920,37 +895,44 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         Binding::new(is_const, expr)
     }
 
-    fn resolve_function_access(&mut self, function: NodeIndex) -> Binding {
-        let handle = self.this.handle().clone();
-        let node = Node(handle, function);
+    fn resolve_function_access(&mut self, handle: &Handle, function: NodeIndex) -> Binding {
+        let node = Node(handle.clone(), function);
         let ty = self.resolve_fn_proto(&node);
         Binding::Constant(Expr(ty, Value::Unknown))
     }
 
-    fn resolve_function_param_access(&mut self, param: NodeIndex) -> Binding {
-        let handle = self.this.handle().clone();
-        let node = Node(handle, param);
+    fn resolve_function_param_access(&mut self, handle: &Handle, param: NodeIndex) -> Binding {
+        let node = Node(handle.clone(), param);
         let ty = self.resolve_type(node);
         Binding::Constant(Expr(ty, Value::Runtime))
     }
 
-    fn resolve_optional_payload_access(&mut self, condition: NodeIndex) -> Binding {
-        let handle = self.this.handle().clone();
-        let node = Node(handle, condition);
+    fn resolve_optional_payload_access(
+        &mut self,
+        handle: &Handle,
+        condition: NodeIndex,
+    ) -> Binding {
+        let node = Node(handle.clone(), condition);
         let binding = self.resolve_binding(node);
         binding.unwrap_optional(&self.ip)
     }
 
-    fn resolve_error_union_payload_access(&mut self, condition: NodeIndex) -> Binding {
-        let handle = self.this.handle().clone();
-        let node = Node(handle, condition);
+    fn resolve_error_union_payload_access(
+        &mut self,
+        handle: &Handle,
+        condition: NodeIndex,
+    ) -> Binding {
+        let node = Node(handle.clone(), condition);
         let binding = self.resolve_binding(node);
         binding.unwrap_error_union_payload(&self.ip)
     }
 
-    fn resolve_error_union_error_access(&mut self, condition: NodeIndex) -> Binding {
-        let handle = self.this.handle().clone();
-        let node = Node(handle, condition);
+    fn resolve_error_union_error_access(
+        &mut self,
+        handle: &Handle,
+        condition: NodeIndex,
+    ) -> Binding {
+        let node = Node(handle.clone(), condition);
         let binding = self.resolve_binding(node);
         binding.unwrap_error_union_error(&self.ip)
     }
@@ -1026,25 +1008,17 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 let Member::Field(field) = member else {
                     return Binding::Unknown;
                 };
-                let this = container_type.this().clone();
+                let this = container_type.this();
                 let handle = this.handle();
                 member_info.map(|m| *m = Some((handle.clone(), member)));
-                let mut analyzer = Analyzer {
-                    ip: self.ip,
-                    cache: self.cache,
-                    documents: self.documents,
-                    std_dir: self.std_dir,
-                    this,
-                };
-                analyzer.resolve_field_access_this(val, field)
+                self.resolve_field(val, handle.clone(), field)
             }
             _ => return Binding::Unknown,
         };
         Binding::new(is_const, expr)
     }
 
-    pub fn resolve_field_access_this(&mut self, val: Value, field: NodeIndex) -> Expr {
-        let handle = self.this.handle().clone();
+    pub fn resolve_field(&mut self, val: Value, handle: Handle, field: NodeIndex) -> Expr {
         let tree = handle.tree();
         let container_field: full::ContainerField = tree.full_node(field).unwrap();
         let Some(ty_index) = container_field.ast.type_expr.to_option() else {
@@ -1198,6 +1172,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
     fn resolve_builtin_call(&mut self, node: &Node) -> Expr {
         let handle = node.handle();
         let tree = handle.tree();
+        let main_token = tree.node_main_token(node.index());
         let args_buf = tree.builtin_call_params(node.index()).unwrap();
         let args = args_buf.get();
         match tree.builtin_call_tag(node.index()).unwrap() {
@@ -1205,7 +1180,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             BuiltinFnTag::import => self.resolve_builtin_call_import(handle, args),
 
             BuiltinFnTag::FieldType => Expr::from(Type::Unknown),
-            BuiltinFnTag::This => Expr::from(self.resolve_builtin_call_this()),
+            BuiltinFnTag::This => Expr::from(self.resolve_builtin_call_this(handle, main_token)),
             BuiltinFnTag::EnumLiteral => Expr::from(Type::Unknown),
             BuiltinFnTag::Int => Expr::from(Type::Unknown),
             BuiltinFnTag::Tuple => Expr::from(Type::Unknown),
@@ -1280,12 +1255,14 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         Expr::from(Type::Interned(index))
     }
 
-    fn resolve_builtin_call_this(&mut self) -> Type {
-        let this = self.this.clone();
-        let container_type = ContainerType::new(this, self.documents);
-        let interned = InternedType::Container(container_type);
-        let index = self.ip.intern_type(interned);
-        Type::Interned(index)
+    fn resolve_builtin_call_this(&mut self, handle: &Handle, main_token: TokenIndex) -> Type {
+        let Some(document) = self.documents.get(handle.path()) else {
+            return Type::Unknown;
+        };
+        let Some(container) = document.enclosing_container(main_token) else {
+            return Type::Unknown;
+        };
+        self.resolve_type(Node(handle.clone(), container.index))
     }
 
     fn resolve_builtin_call_type_of(&mut self, handle: &Handle, args: &[NodeIndex]) -> Type {
@@ -1940,7 +1917,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 }
                 let member = Member::Field(node.index());
                 member_info.map(|info| *info = Some((handle.clone(), member)));
-                let expr = self.resolve_field_access_this(Value::Runtime, node.index());
+                let expr = self.resolve_field(Value::Runtime, handle.clone(), node.index());
                 Some(expr)
             }
             NodeTag::GlobalVarDecl
@@ -1956,7 +1933,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 }
                 let member = Member::Variable(node.index());
                 member_info.map(|info| *info = Some((handle.clone(), member)));
-                let binding = self.resolve_decl_access_this(member);
+                let binding = self.resolve_decl(handle, member);
                 Some(binding.expr())
             }
             NodeTag::FnProtoSimple
@@ -1973,7 +1950,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 if token_index == name_token {
                     let member = Member::Function(node.index());
                     member_info.map(|info| *info = Some((handle.clone(), member)));
-                    let binding = self.resolve_decl_access_this(member);
+                    let binding = self.resolve_decl(handle, member);
                     return Some(binding.expr());
                 }
                 let mut it = TokenIterator::new(tree, token_index);
@@ -1994,7 +1971,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                     };
                     let member = Member::FunctionParameter(param);
                     member_info.map(|info| *info = Some((handle.clone(), member)));
-                    let binding = self.resolve_decl_access_this(member);
+                    let binding = self.resolve_decl(handle, member);
                     return Some(binding.expr());
                 }
                 None
@@ -2030,19 +2007,19 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                     (Some(payload_token), None) if token_index == payload_token => {
                         let member = Member::OptionalPayload(condition, token_index);
                         member_info.map(|info| *info = Some((handle.clone(), member)));
-                        let binding = self.resolve_decl_access_this(member);
+                        let binding = self.resolve_decl(handle, member);
                         Some(binding.expr())
                     }
                     (Some(payload_token), Some(_)) if token_index == payload_token => {
                         let member = Member::ErrorUnionPayload(condition, token_index);
                         member_info.map(|info| *info = Some((handle.clone(), member)));
-                        let binding = self.resolve_decl_access_this(member);
+                        let binding = self.resolve_decl(handle, member);
                         Some(binding.expr())
                     }
                     (Some(_), Some(error_token)) if token_index == error_token => {
                         let member = Member::ErrorUnionError(condition, token_index);
                         member_info.map(|info| *info = Some((handle.clone(), member)));
-                        let binding = self.resolve_decl_access_this(member);
+                        let binding = self.resolve_decl(handle, member);
                         Some(binding.expr())
                     }
                     _ => None,
@@ -2060,7 +2037,7 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 let NodeAndNode(lhs, _) = unsafe { tree.node_data_unchecked(node.index()) };
                 let member = Member::ErrorUnionError(lhs, token_index);
                 member_info.map(|info| *info = Some((handle.clone(), member)));
-                let binding = self.resolve_decl_access_this(member);
+                let binding = self.resolve_decl(handle, member);
                 Some(binding.expr())
             }
             _ => None,

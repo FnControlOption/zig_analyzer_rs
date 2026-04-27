@@ -1,6 +1,6 @@
 use std::cell::LazyCell;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -47,13 +47,25 @@ impl PartialEq for Handle {
 
 impl Eq for Handle {}
 
+impl PartialOrd for Handle {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl Ord for Handle {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
 impl Hash for Handle {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.path().hash(state);
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Node(pub Handle, pub NodeIndex);
 
 impl Node {
@@ -159,6 +171,14 @@ impl Binding {
             Expr(ty, val)
         })
     }
+
+    pub fn parameterize(self, ip: &mut InternPool, args: &BTreeMap<Node, Expr>) -> Self {
+        match self {
+            Binding::Unknown => Binding::Unknown,
+            Binding::Constant(expr) => Binding::Constant(expr.parameterize(ip, args)),
+            Binding::Variable(expr) => Binding::Variable(expr.parameterize(ip, args)),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -171,6 +191,12 @@ impl Expr {
 
     pub fn value(self) -> Value {
         self.1
+    }
+
+    pub fn parameterize(self, ip: &mut InternPool, args: &BTreeMap<Node, Expr>) -> Self {
+        let Self(ty, val) = self;
+        let ty = ty.parameterize(ip, args);
+        Self(ty, val)
     }
 }
 
@@ -206,6 +232,83 @@ pub enum Type {
     Interned(u32),
 }
 
+impl Type {
+    pub fn parameterize(self, ip: &mut InternPool, args: &BTreeMap<Node, Expr>) -> Self {
+        let Type::Interned(index) = self else {
+            return self;
+        };
+        let Some(interned) = ip.get_type(index) else {
+            return self;
+        };
+        let interned = match interned {
+            InternedType::Parameter(node) => {
+                return match args.get(node) {
+                    Some(&Expr(Type::Type, Value::Type(ty))) => ty.parameterize(ip, args), // TODO: add `visited` parameter to prevent infinite recursion
+                    _ => self,
+                };
+            }
+            &InternedType::Optional(mut child) => {
+                child = child.parameterize(ip, args);
+                InternedType::Optional(child)
+            }
+            InternedType::ErrorSet(_) => {
+                return self;
+            }
+            &InternedType::ErrorUnion(mut error, mut payload) => {
+                error = error.parameterize(ip, args);
+                payload = payload.parameterize(ip, args);
+                InternedType::ErrorUnion(error, payload)
+            }
+            &InternedType::Vector(mut child) => {
+                child = child.parameterize(ip, args);
+                InternedType::Vector(child)
+            }
+            &InternedType::Array(mut array_type) => {
+                array_type.elem = array_type.elem.parameterize(ip, args);
+                InternedType::Array(array_type)
+            }
+            &InternedType::Pointer(mut pointer_type) => {
+                pointer_type.child = pointer_type.child.parameterize(ip, args);
+                InternedType::Pointer(pointer_type)
+            }
+            InternedType::Function(function_type) => {
+                let mut function_type = function_type.clone();
+                for param in function_type.params.iter_mut() {
+                    *param = param.parameterize(ip, args);
+                }
+                function_type.return_type = function_type.return_type.parameterize(ip, args);
+                InternedType::Function(function_type)
+            }
+            InternedType::Tuple(types) => {
+                let mut types = types.clone();
+                for ty in types.iter_mut() {
+                    *ty = ty.parameterize(ip, args);
+                }
+                InternedType::Tuple(types)
+            }
+            InternedType::Container(_) => {
+                return self;
+            }
+            InternedType::Parameterized(parameterized_type) => {
+                let mut parameterized_type = parameterized_type.clone();
+                for (node, &expr) in args {
+                    parameterized_type.args.insert(node.clone(), expr);
+                }
+                InternedType::Parameterized(parameterized_type)
+            }
+            InternedType::Branched(old_types) => {
+                let mut new_types = BTreeSet::new();
+                for TypeOrd(ty) in old_types.clone() {
+                    new_types.insert(TypeOrd(ty.parameterize(ip, args)));
+                }
+                InternedType::Branched(new_types)
+            }
+        };
+        let index = ip.intern_type(interned);
+        Self::Interned(index)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Signedness {
     Signed,
@@ -223,6 +326,8 @@ pub enum InternedType {
     Function(FunctionType),
     Tuple(Vec<Type>),
     Container(ContainerType),
+    Parameterized(ParameterizedType),
+    Parameter(Node),
     Branched(BTreeSet<TypeOrd>),
 }
 
@@ -335,6 +440,12 @@ impl Hash for ContainerType {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.this.hash(state);
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ParameterizedType {
+    pub container: ContainerType,
+    pub args: BTreeMap<Node, Expr>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -812,8 +923,12 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let Some(interned) = self.ip.get_type(index) else {
             return Binding::Unknown;
         };
-        let InternedType::Container(container_type) = interned else {
-            return Binding::Unknown;
+        let (container_type, args) = match interned {
+            InternedType::Container(container_type) => (container_type, None),
+            InternedType::Parameterized(ParameterizedType { container, args }) => {
+                (container, Some(args.clone()))
+            }
+            _ => return Binding::Unknown,
         };
         let Some(scope) = container_type.scope() else {
             return Binding::Unknown;
@@ -824,7 +939,11 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let this = container_type.this().clone();
         let handle = this.handle();
         member_info.map(|m| *m = Some((handle.clone(), member)));
-        self.resolve_decl(handle, member)
+        let binding = self.resolve_decl(handle, member);
+        match args {
+            Some(args) => binding.parameterize(self.ip, &args),
+            None => binding,
+        }
     }
 
     pub fn resolve_decl(&mut self, handle: &Handle, member: Member) -> Binding {
@@ -913,7 +1032,17 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
     fn resolve_function_param_access(&mut self, handle: &Handle, param: NodeIndex) -> Binding {
         let node = Node(handle.clone(), param);
         let ty = self.resolve_type(node);
-        Binding::Constant(Expr(ty, Value::Runtime))
+        // TODO: check if comptime parameter
+        let val = match ty {
+            Type::Type => {
+                let node = Node(handle.clone(), param);
+                let interned = InternedType::Parameter(node);
+                let index = self.ip.intern_type(interned);
+                Value::Type(Type::Interned(index))
+            }
+            _ => Value::Runtime,
+        };
+        Binding::Constant(Expr(ty, val))
     }
 
     fn resolve_optional_payload_access(
@@ -1007,7 +1136,14 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 },
                 _ => return Binding::Unknown,
             },
-            InternedType::Container(container_type) => {
+            _ => {
+                let (container_type, args) = match interned {
+                    InternedType::Container(container_type) => (container_type, None),
+                    InternedType::Parameterized(ParameterizedType { container, args }) => {
+                        (container, Some(args.clone()))
+                    }
+                    _ => return Binding::Unknown,
+                };
                 let Some(scope) = container_type.scope() else {
                     return Binding::Unknown;
                 };
@@ -1020,9 +1156,12 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 let this = container_type.this();
                 let handle = this.handle();
                 member_info.map(|m| *m = Some((handle.clone(), member)));
-                self.resolve_field(val, handle.clone(), field)
+                let expr = self.resolve_field(val, handle.clone(), field);
+                match args {
+                    Some(args) => expr.parameterize(self.ip, &args),
+                    None => expr,
+                }
             }
-            _ => return Binding::Unknown,
         };
         Binding::new(is_const, expr)
     }
@@ -1590,6 +1729,17 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
         let tree = handle.tree();
         let buffered = tree.full_node_buffered(node.index()).unwrap();
         let call: &full::Call = buffered.get();
+
+        // Resolve call arguments
+        let call_args = {
+            let mut vec = Vec::with_capacity(call.ast.params_len);
+            for &arg in call.ast.params() {
+                vec.push(self.resolve_expr(Node::from(handle, arg)));
+            }
+            vec
+        };
+
+        // Resolve called function
         let fn_expr_index = call.ast.fn_expr;
         let mut fn_expr = self.resolve_expr(Node::from(handle, fn_expr_index));
         if fn_expr.type_of() == Type::Unknown
@@ -1620,6 +1770,96 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             }
             _ => return Expr(Type::Unknown, val.to_unknown()),
         };
+
+        // Handle function that returns a type
+        'meta: {
+            if fn_type.return_type != Type::Type {
+                break 'meta;
+            }
+            if fn_type.params.len() != call.ast.params_len {
+                break 'meta;
+            }
+            let Value::Interned(index) = val else {
+                break 'meta;
+            };
+            let Some(interned) = self.ip.get_value(index) else {
+                break 'meta;
+            };
+            let InternedValue::Function(node) = interned else {
+                break 'meta;
+            };
+
+            let handle = node.handle();
+            let tree = handle.tree();
+            assert_eq!(tree.node_tag(node.index()), NodeTag::FnDecl);
+            let NodeAndNode(proto, body) = unsafe { tree.node_data_unchecked(node.index()) };
+
+            let fn_proto_buf = tree.full_node_buffered(proto).unwrap();
+            let fn_proto: &full::FnProto = fn_proto_buf.get();
+            assert_eq!(fn_proto.ast.params_len, fn_type.params.len());
+
+            // Construct parameterized type name
+            let name = {
+                let name_token = fn_proto.name_token.to_option().unwrap();
+                let mut vec = Vec::new();
+                vec.extend_from_slice(tree.token_slice(name_token));
+                vec.push(b'(');
+                for (i, &arg) in call_args.iter().enumerate() {
+                    if i > 0 {
+                        vec.extend_from_slice(b", ");
+                    }
+                    let arg_str = format!("{}", arg.display(self.ip));
+                    vec.extend_from_slice(arg_str.as_bytes());
+                }
+                vec.push(b')');
+                vec
+            };
+
+            // Map call arguments to function parameters
+            let mut args = BTreeMap::new();
+            for (&param, &arg) in std::iter::zip(fn_proto.ast.params(), call_args.iter()) {
+                args.insert(Node::from(handle, param), arg);
+            }
+
+            // Get returned container type
+            let statements_buf = tree.block_statements(body).unwrap();
+            let statements = statements_buf.get();
+            let Some(&last_statement) = statements.last() else {
+                break 'meta;
+            };
+            if tree.node_tag(last_statement) != NodeTag::Return {
+                break 'meta;
+            }
+            let opt_index: OptionalNodeIndex = unsafe { tree.node_data_unchecked(last_statement) };
+            let Some(expr_index) = opt_index.to_option() else {
+                break 'meta;
+            };
+            let ty = self.resolve_type(Node::from(handle, expr_index));
+            let Type::Interned(index) = ty else {
+                return Expr(Type::Type, Value::Type(ty));
+            };
+            let Some(interned) = self.ip.get_type(index) else {
+                return Expr(Type::Type, Value::Type(ty));
+            };
+            let container_type = match interned {
+                InternedType::Container(container_type) => container_type,
+                InternedType::Parameterized(parameterized_type) => {
+                    for (node, &expr) in &parameterized_type.args {
+                        args.insert(node.clone(), expr);
+                    }
+                    &parameterized_type.container
+                }
+                _ => return Expr(Type::Type, Value::Type(ty)),
+            };
+
+            // Create parameterized type
+            let mut container = container_type.clone();
+            container.name = Some(name);
+            let interned = InternedType::Parameterized(ParameterizedType { container, args });
+            let index = self.ip.intern_type(interned);
+            return Expr(Type::Type, Value::Type(Type::Interned(index)));
+        }
+
         Expr(fn_type.return_type, val.to_unknown())
     }
 
@@ -2307,6 +2547,13 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
                 InternedType::Tuple(types)
             }
             InternedType::Container(_) => {
+                return None;
+            }
+            InternedType::Parameterized(_) => {
+                // TODO: parameterized
+                return None;
+            }
+            InternedType::Parameter(_) => {
                 return None;
             }
             InternedType::Branched(_) => {
@@ -3033,7 +3280,11 @@ impl PeerResolveStrategy {
                     InternedType::ErrorSet(_) => Self::ErrorSet,
                     InternedType::ErrorUnion(_, _) => Self::ErrorUnion,
                     InternedType::Tuple(_) => Self::Tuple,
-                    InternedType::Container(container_type) => {
+                    InternedType::Container(container_type)
+                    | InternedType::Parameterized(ParameterizedType {
+                        container: container_type,
+                        args: _,
+                    }) => {
                         let node = container_type.this();
                         let tree = node.handle().tree();
                         match tree.token_tag(tree.node_main_token(node.index())) {
@@ -3043,6 +3294,7 @@ impl PeerResolveStrategy {
                         }
                     }
                     InternedType::Function(_) => Self::Func,
+                    InternedType::Parameter(_) => Self::Exact,
                     InternedType::Branched(_) => {
                         // TODO: what does PTR with branching types mean?
                         Self::Exact

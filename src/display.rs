@@ -200,8 +200,7 @@ impl Display for InternedTypeDisplay<'_, '_> {
             }
             InternedType::Container(container_type) => {
                 if let Some(name) = &container_type.name {
-                    f.write_str(&String::from_utf8_lossy(name))?;
-                    return Ok(());
+                    return f.write_str(&String::from_utf8_lossy(name));
                 }
                 let source = container_type.source();
                 if source.contains(&b'\n') {
@@ -209,6 +208,21 @@ impl Display for InternedTypeDisplay<'_, '_> {
                 } else {
                     f.write_str(&String::from_utf8_lossy(source))
                 }
+            }
+            InternedType::Parameterized(ParameterizedType { container, args: _ }) => {
+                match &container.name {
+                    Some(name) => f.write_str(&String::from_utf8_lossy(name)),
+                    None => f.write_str("[parameterized]"),
+                }
+            }
+            InternedType::Parameter(node) => {
+                let handle = node.handle();
+                let tree = handle.tree();
+                let first_token = tree.first_token(node.index());
+                let name_token = TokenIndex(first_token.0 - 2);
+                assert_eq!(tree.token_tag(name_token), TokenTag::Identifier);
+                let name = tree.token_slice(name_token);
+                f.write_str(&String::from_utf8_lossy(name))
             }
             InternedType::Branched(_) => f.write_str("[branched]"),
         }

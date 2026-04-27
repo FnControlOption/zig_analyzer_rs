@@ -85,6 +85,22 @@ fn test_function_parameter() {
         ),
         "bar: usize",
     );
+    check(
+        docstr!(
+            /// fn foo(Bar: type, baz: bool) void {}
+            ///        ^~~ (type)(Bar)
+        ),
+        "Bar: type",
+    );
+    check(
+        docstr!(
+            /// fn foo(Bar: type, baz: bool) void {
+            ///     _ = Bar;
+            ///         ^~~ (type)(Bar)
+            /// }
+        ),
+        "Bar: type",
+    );
 }
 
 #[test]

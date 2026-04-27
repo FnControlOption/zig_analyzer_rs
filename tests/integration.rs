@@ -851,6 +851,116 @@ fn test_call_method() {
 }
 
 #[test]
+fn test_foobar() {
+    let mut test = Test::new();
+
+    let source = docstr!(
+        /// struct {
+        ///     fn Foo() type {
+        ///         return struct {
+        ///             const foo: usize = undefined;
+        ///         };
+        ///     }
+        /// }.Foo().foo
+    );
+    check! {
+        let Expr(Type::Usize, Value::Undefined) = test.resolve_expr(source)
+    }
+
+    let source = docstr!(
+        /// struct {
+        ///     fn Foo(T: type) type {
+        ///         return struct {
+        ///             const foo: T = undefined;
+        ///         };
+        ///     }
+        /// }.Foo(usize).foo
+    );
+    check! {
+        let Expr(Type::Usize, Value::Undefined) = test.resolve_expr(source)
+    }
+
+    let source = docstr!(
+        /// struct {
+        ///     fn Foo(T: type) type {
+        ///         return struct {
+        ///             const foo: ?T = undefined;
+        ///         };
+        ///     }
+        /// }.Foo(usize).foo
+    );
+    check! {
+        let Expr(ty, Value::Undefined) = test.resolve_expr(source)
+        && test.format_type(ty) == "?usize"
+    }
+
+    let source = docstr!(
+        /// @as(struct {
+        ///     fn Foo() type {
+        ///         return struct { foo: usize };
+        ///     }
+        /// }.Foo(), undefined).foo
+    );
+    check! {
+        let Expr(Type::Usize, Value::Unknown) = test.resolve_expr(source)
+    }
+
+    let source = docstr!(
+        /// @as(struct {
+        ///     fn Foo(T: type) type {
+        ///         return struct { foo: T };
+        ///     }
+        /// }.Foo(usize), undefined).foo
+    );
+    check! {
+        let Expr(Type::Usize, Value::Unknown) = test.resolve_expr(source)
+    }
+
+    let source = docstr!(
+        /// @as(struct {
+        ///     fn Foo(T: type) type {
+        ///         return struct { foo: ?T };
+        ///     }
+        /// }.Foo(usize), undefined).foo
+    );
+    check! {
+        let Expr(ty, Value::Unknown) = test.resolve_expr(source)
+        && test.format_type(ty) == "?usize"
+    }
+}
+
+#[test]
+fn test_call_type_function() {
+    let mut test = Test::new();
+
+    let source = docstr!(
+        /// struct {
+        ///     fn Foo() type {
+        ///         return struct { foo: usize };
+        ///     }
+        /// }.Foo()
+    );
+    check! {
+        let Expr(Type::Type, value) = test.resolve_expr(source)
+        && let Value::Type(ty) = value
+        && test.format_type(ty) == "Foo()"
+    }
+
+    let source = docstr!(
+        /// struct {
+        ///     fn Foo(T: type) type {
+        ///         return struct { foo: T };
+        ///     }
+        /// }.Foo(usize)
+    );
+    check! {
+        let Expr(Type::Type, value) = test.resolve_expr(source)
+        && let Value::Type(ty) = value
+        && test.format_type(ty) == "Foo(usize)"
+    }
+}
+
+#[test]
 fn test_noreturn() {
     let mut test = Test::new();
     check! {

@@ -1082,7 +1082,8 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             | NodeTag::GreaterThan
             | NodeTag::LessOrEqual
             | NodeTag::GreaterOrEqual => self.resolve_comparison(node),
-            NodeTag::BoolAnd | NodeTag::BoolOr | NodeTag::BoolNot => self.resolve_bool_op(node),
+            NodeTag::BoolAnd | NodeTag::BoolOr => self.resolve_bool_op(node),
+            NodeTag::BoolNot => self.resolve_bool_not(node),
             NodeTag::ArrayMult => self.resolve_array_mult(node),
             NodeTag::ArrayCat => self.resolve_array_cat(node),
             NodeTag::CallOne | NodeTag::CallOneComma | NodeTag::Call | NodeTag::CallComma => {
@@ -1435,6 +1436,14 @@ impl<'ip, 'cache, 'doc, 'std> Analyzer<'ip, 'cache, 'doc, 'std> {
             _ => Value::Unknown,
         };
         Expr(Type::Bool, unknown)
+    }
+
+    fn resolve_bool_not(&mut self, node: &Node) -> Expr {
+        let handle = node.handle();
+        let tree = handle.tree();
+        let index: NodeIndex = unsafe { tree.node_data_unchecked(node.index()) };
+        let Expr(_ty, val) = self.resolve_expr(Node::from(handle, index));
+        Expr(Type::Bool, val.to_unknown())
     }
 
     fn resolve_array_mult(&mut self, node: &Node) -> Expr {

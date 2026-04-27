@@ -40,11 +40,30 @@ struct InternedValueDisplay<'val, 'ip>(&'val InternedValue, &'ip InternPool);
 
 impl Display for ExprDisplay<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        let Self(expr, ip) = self;
-        match expr {
-            Expr(Type::Unknown, Value::Unknown) => f.write_str("[unknown]"),
-            Expr(Type::Type, Value::Type(ty)) => ty.display(ip).fmt(f),
-            Expr(ty, val) => write!(f, "@as({}, {})", ty.display(ip), val.display(ip)),
+        let &Self(Expr(ty, val), ip) = self;
+        match (ty, val) {
+            (Type::Unknown, Value::Unknown) => f.write_str("[unknown]"),
+            (Type::Undefined, Value::Undefined)
+            | (Type::Void, Value::Void)
+            | (Type::Null, Value::Null)
+            | (Type::Bool, Value::False)
+            | (Type::Bool, Value::True)
+            | (Type::ComptimeInt, Value::Int(_))
+            | (Type::Type, Value::Type(_)) => val.display(ip).fmt(f),
+            (Type::EnumLiteral, Value::Interned(index))
+                if let Some(InternedValue::EnumLiteral(_)) = ip.get_value(index) =>
+            {
+                val.display(ip).fmt(f)
+            }
+            (Type::Interned(ty_index), Value::Interned(val_index))
+                if let Some(InternedType::ErrorSet(names)) = ip.get_type(ty_index)
+                    && names.len() == 1
+                    && let Some(InternedValue::ErrorValue(name)) = ip.get_value(val_index)
+                    && names.contains(name) =>
+            {
+                val.display(ip).fmt(f)
+            }
+            _ => write!(f, "@as({}, {})", ty.display(ip), val.display(ip)),
         }
     }
 }
